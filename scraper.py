@@ -518,95 +518,132 @@ def scrape_caesars_offers(driver):
     section_count = len(see_more_elements)
     print(f"  Found {section_count} sections")
 
-    # Check how many offer cards are on the main page
-    main_testid_count = driver.execute_script("return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
-    print(f"  Main page offer-details count: {main_testid_count}")
-
-    # Scrape all visible offers on the main page first
-    all_offers = scrape_offers_from_current_page(driver, 'ALL')
-    print(f"  Main page offers: {len(all_offers)}")
+    all_offers = []
 
     for idx in range(section_count):
-        # Re-find elements each time (page reloads lose references)
+        # Navigate back to offers page each time
         driver.get('https://www.caesars.com/rewards/offers')
         human_delay(3, 5)
 
-        # Scroll down to load all sections
+        # Scroll to load all sections
         for _ in range(5):
             driver.execute_script("window.scrollBy(0, 600);")
             human_delay(0.5, 1)
         driver.execute_script("window.scrollTo(0, 0);")
         human_delay(1, 2)
 
-        # Re-find and click the Nth "See More"
+        # Re-find "See More" buttons
         see_more = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"]')
         if idx >= len(see_more):
             break
 
         label = see_more[idx].get_attribute('aria-label') or ''
         name = label.replace('See more ', '').strip()
-        print(f"  📂 Clicking: {label}...")
+        print(f"  📂 Section: {name}...")
 
+        # Click "See More" to go to section page
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", see_more[idx])
         human_delay(0.5, 1)
         see_more[idx].click()
         human_delay(3, 5)
 
-        print(f"    URL: {driver.current_url[:80]}")
-
-        # Wait for offer cards to render on section page
-        for wait_i in range(5):
+        # Wait for offer cards to load
+        for _ in range(5):
             count = driver.execute_script("return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
             if count > 0:
                 break
             human_delay(2, 3)
 
-        # Scrape this section page
-        page_offers = scrape_offers_from_current_page(driver, name)
-        all_offers.extend(page_offers)
-        print(f"    Page 1: {len(page_offers)} offers")
+        # Click the FIRST offer card to open details panel
+        first_card = driver.find_elements(By.CSS_SELECTOR, '[aria-label="Open Offer Details"]')
+        if not first_card:
+            print(f"    No offer cards found")
+            continue
 
-        if not page_offers:
-            text = driver.find_element(By.TAG_NAME, 'body').text[:400]
-            # Also check for data-testid count
-            testid_count = driver.execute_script("return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
-            print(f"    DEBUG: data-testid count={testid_count}, text={text[:150]}")
+        first_card[0].click()
+        human_delay(1.5, 2.5)
 
-        # Handle pagination within the section
-        page_num = 1
-        while True:
-            page_num += 1
-            next_clicked = False
-            try:
-                next_clicked = driver.execute_script("""
-                    var els = document.querySelectorAll('[role="button"], a, button');
-                    for (var i = 0; i < els.length; i++) {
-                        var text = els[i].textContent.trim();
-                        if (text === '""" + str(page_num) + """' && els[i].offsetWidth > 0) {
-                            els[i].click();
-                            return true;
-                        }
+        # Now cycle through ALL offers using "View details of NEXT offer" button
+        offer_count = 0
+        seen_titles = set()
+        max_offers = 100  # safety limit per section
+
+        while offer_count < max_offers:
+            # Extract current offer details from the detail panel
+            offer = driver.execute_script("""
+                var body = document.body.innerText;
+                var lines = body.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
+
+                // The detail panel shows: title, expiry, offer ID, description, properties
+                var title = '';
+                var offerId = '';
+                var dates = '';
+                var description = '';
+                var properties = '';
+
+                for (var i = 0; i < lines.length; i++) {
+                    if (lines[i].match(/^Offer\\s+[A-Z0-9]{6,}/i)) {
+                        offerId = lines[i].replace(/^Offer\\s+/i, '').trim();
                     }
-                    for (var i = 0; i < els.length; i++) {
-                        var text = els[i].textContent.trim();
-                        var label = els[i].getAttribute('aria-label') || '';
-                        if ((text === '›' || text === '»' || label.toLowerCase().includes('next')) && els[i].offsetWidth > 0) {
-                            els[i].click();
-                            return true;
-                        }
+                    if (lines[i].match(/^Expires?\\s/i) || lines[i].match(/^Valid\\s/i)) {
+                        dates = lines[i];
                     }
-                    return false;
-                """)
-            except:
+                    if (lines[i].match(/AVAILABLE.*RESORTS/i)) {
+                        properties = lines[i+1] || '';
+                    }
+                }
+
+                // Title is typically the first large text in the detail panel
+                // Look for elements with aria-label that might contain the offer title
+                var detailPanel = document.querySelector('[class*="r-1p0dtai"]') ||
+                                  document.querySelector('[class*="panel"]') ||
+                                  document.body;
+                var allText = detailPanel.innerText;
+                var allLines = allText.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l && l.length > 3; });
+
+                // First meaningful line is usually the title
+                for (var j = 0; j < Math.min(allLines.length, 5); j++) {
+                    if (!allLines[j].match(/^(HOME|STAYS|OFFERS|BENEFITS|SUPPORT|ACCOUNT|BOOK|DEALS|DESTINATIONS)/i) &&
+                        !allLines[j].match(/^(FILTER|DESTINATIONS|DATES|OFFER TYPE|Clear)/i) &&
+                        allLines[j].length > 3 && allLines[j].length < 100) {
+                        title = allLines[j];
+                        break;
+                    }
+                }
+
+                return {
+                    title: title,
+                    offerId: offerId,
+                    dates: dates,
+                    properties: properties,
+                    description: allText.substring(0, 300)
+                };
+            """)
+
+            title = offer.get('title', '')
+
+            # Stop if we've seen this title before (looped back to start)
+            if title in seen_titles:
                 break
-            if not next_clicked:
+            if title:
+                seen_titles.add(title)
+                offer['section'] = name
+                offer['offer_id'] = offer.get('offerId') or f"{title}-{offer.get('dates','')}".replace(' ', '-')[:50]
+                all_offers.append(offer)
+                offer_count += 1
+
+            # Click "View details of NEXT offer" to advance
+            next_btn = driver.find_elements(By.CSS_SELECTOR, '[aria-label="View details of NEXT offer."]')
+            if not next_btn:
+                # Try partial match
+                next_btn = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="NEXT offer"]')
+            if not next_btn:
                 break
-            human_delay(2, 4)
-            page_offers = scrape_offers_from_current_page(driver, name)
-            if not page_offers:
-                break
-            all_offers.extend(page_offers)
-            print(f"    Page {page_num}: {len(page_offers)} offers")
+
+            next_btn[0].click()
+            human_delay(0.8, 1.5)
+
+        print(f"    {offer_count} offers scraped")
 
     # Deduplicate by title+dates
     seen = set()
