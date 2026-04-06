@@ -276,14 +276,8 @@ def scrape_caesars(driver):
 def caesars_login(driver):
     print("🔑 Logging in to Caesars...")
 
-    # Try loading saved cookies first
-    if load_cookies(driver, 'caesars', 'www.caesars.com'):
-        if verify_session(driver, 'https://www.caesars.com/rewards/home', 'REWARD CREDITS'):
-            print("  ✅ Session restored from cookies!")
-            return
-        else:
-            print("  🍪 Cookies expired, doing full login...")
-
+    # Skip cookie loading for Caesars — Imperva blocks cookie-injected sessions
+    # Always do a fresh login with undetected-chromedriver (works reliably)
     driver.get('https://www.caesars.com/myrewards/profile/signin/')
     human_delay(3, 5)
 
