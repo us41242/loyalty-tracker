@@ -133,9 +133,84 @@ try:
     print(f"  URL after login: {driver.current_url}")
     print(f"  Title: {driver.title}")
 
-    # Step 5: Check result
+    # Step 5: Handle Imperva "I am human" challenge if present
     text = driver.find_element(By.TAG_NAME, 'body').text[:500]
     print(f"  Page text: {text[:200]}")
+
+    if 'security check' in text.lower() or 'i am human' in text.lower() or 'incapsula' in text.lower():
+        print("\nStep 5: Imperva challenge detected — clicking 'I am human'...")
+
+        # The "I am human" checkbox may be in an iframe
+        iframes = driver.find_elements(By.TAG_NAME, 'iframe')
+        print(f"  Found {len(iframes)} iframes")
+
+        clicked = False
+
+        # Try clicking in each iframe
+        for idx, iframe in enumerate(iframes):
+            try:
+                driver.switch_to.frame(iframe)
+                print(f"  Switched to iframe {idx}")
+
+                # Look for checkbox
+                checkboxes = driver.find_elements(By.CSS_SELECTOR, 'input[type="checkbox"], .checkbox, #checkbox, [role="checkbox"]')
+                anchors = driver.find_elements(By.CSS_SELECTOR, 'a, label, span, div')
+
+                for el in checkboxes + anchors:
+                    el_text = el.text.strip() if el.text else ''
+                    el_id = el.get_attribute('id') or ''
+                    if 'human' in el_text.lower() or 'checkbox' in el_id.lower():
+                        print(f"  Found element: {el.tag_name} id={el_id} text={el_text[:30]}")
+                        el.click()
+                        clicked = True
+                        break
+
+                driver.switch_to.default_content()
+                if clicked:
+                    break
+            except Exception as e:
+                print(f"  iframe {idx} error: {e}")
+                driver.switch_to.default_content()
+
+        # If no iframe, try clicking directly on the page
+        if not clicked:
+            print("  Trying direct click on checkbox...")
+            try:
+                # Try finding the checkbox by various selectors
+                selectors = [
+                    '#checkbox',
+                    'input[type="checkbox"]',
+                    '.cb-i',
+                    '[class*="checkbox"]',
+                    'label',
+                ]
+                for sel in selectors:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for el in els:
+                        if el.is_displayed():
+                            print(f"  Clicking {sel}: {el.get_attribute('id')}")
+                            el.click()
+                            clicked = True
+                            break
+                    if clicked:
+                        break
+            except Exception as e:
+                print(f"  Direct click error: {e}")
+
+        if not clicked:
+            # Last resort: click at the approximate checkbox location
+            print("  Trying coordinate click on checkbox area...")
+            from selenium.webdriver.common.action_chains import ActionChains
+            # The checkbox appears to be around (480, 150) based on the screenshot
+            actions = ActionChains(driver)
+            actions.move_by_offset(480, 170).click().perform()
+            time.sleep(1)
+
+        time.sleep(10)
+        driver.save_screenshot('debug/05-after-challenge.png')
+        print(f"  URL after challenge: {driver.current_url}")
+        text = driver.find_element(By.TAG_NAME, 'body').text[:500]
+        print(f"  Page text: {text[:200]}")
 
     if 'REWARD CREDITS' in text:
         print("\n🎉 LOGIN SUCCESS — Rewards page loaded!")
@@ -144,9 +219,9 @@ try:
     elif 'signin' in driver.current_url.lower():
         print("\n⚠️ Still on signin page — login may have failed")
     else:
-        print(f"\n❓ Unknown state — URL: {driver.current_url}")
+        print(f"\n❓ State — URL: {driver.current_url}")
 
-    driver.save_screenshot('debug/05-final.png')
+    driver.save_screenshot('debug/06-final.png')
 
 except Exception as e:
     print(f"\n💥 Error: {e}")
