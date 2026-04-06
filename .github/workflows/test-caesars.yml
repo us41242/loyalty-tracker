@@ -1,0 +1,43 @@
+name: Test Caesars Login
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install undetected-chromedriver selenium python-dotenv
+
+      - name: Install Chrome
+        run: |
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+          google-chrome --version
+
+      - name: Create debug dir
+        run: mkdir -p debug
+
+      - name: Test Caesars login
+        env:
+          CAESARS_USERNAME: ${{ secrets.CAESARS_USERNAME }}
+          CAESARS_PASSWORD: ${{ secrets.CAESARS_PASSWORD }}
+        run: python test_caesars_login.py
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caesars-login-test
+          path: debug/
+          retention-days: 3
