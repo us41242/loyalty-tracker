@@ -1,113 +1,95 @@
 const { supabase, parseDate } = require('./db');
+const { createPage, humanType, humanClick, humanNavigate, randomDelay } = require('./browser');
 
 async function scrapeMGM(browser) {
   console.log('\n═══════════════════════════════════════');
   console.log('  MGM REWARDS SCRAPER');
   console.log('═══════════════════════════════════════\n');
 
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  });
-  const page = await context.newPage();
+  const page = await createPage(browser);
 
   try {
-    // 1. Login
     await login(page);
-
-    // 2. Scrape rewards
     const rewards = await scrapeRewards(page);
-
-    // 3. Scrape trips
     const trips = await scrapeTrips(page);
-
-    // 4. Save to Supabase
     await saveSnapshot(rewards);
     await saveTrips(trips);
-
     console.log('\n✅ MGM scrape complete!\n');
   } catch (err) {
     console.error('❌ MGM error:', err.message);
   } finally {
-    await context.close();
+    await page.close();
   }
 }
 
-// ── Login ───────────────────────────────────────────────────────────────────
 async function login(page) {
   console.log('🔑 Logging in to MGM...');
-  await page.goto('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=', {
-    waitUntil: 'networkidle', timeout: 30000
-  });
-  await page.waitForTimeout(3000);
+  await humanNavigate(page, 'https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=');
+  await randomDelay(2000, 4000);
 
-  // Fill email
-  const emailInput = page.locator('input[type="email"], input[name="email"], input[id*="email"]').first();
-  if (await emailInput.isVisible().catch(() => false)) {
-    await emailInput.fill(process.env.MGM_EMAIL);
-    await page.waitForTimeout(500);
+  try {
+    const emailInput = await page.$('input[type="email"], input[name="email"], input[id*="email"]');
+    if (emailInput) {
+      await humanType(page, 'input[type="email"], input[name="email"], input[id*="email"]', process.env.MGM_EMAIL);
+      await randomDelay(800, 1500);
 
-    // Some MGM flows have a "Next" button before password
-    const nextBtn = page.locator('button:has-text("Next"), button:has-text("Continue")').first();
-    if (await nextBtn.isVisible().catch(() => false)) {
-      await nextBtn.click();
-      await page.waitForTimeout(2000);
+      // Check for Next/Continue button before password
+      const buttons = await page.$$('button');
+      for (const btn of buttons) {
+        const text = await page.evaluate(e => e.textContent.trim(), btn);
+        if (text === 'Next' || text === 'Continue') {
+          await btn.click();
+          await randomDelay(2000, 3000);
+          break;
+        }
+      }
+
+      // Fill password
+      const passInput = await page.$('input[type="password"]');
+      if (passInput) {
+        await humanType(page, 'input[type="password"]', process.env.MGM_PASSWORD);
+        await randomDelay(800, 1500);
+
+        // Click submit
+        const submitBtns = await page.$$('button');
+        for (const btn of submitBtns) {
+          const text = await page.evaluate(e => e.textContent.trim(), btn);
+          if (text.includes('Sign In') || text.includes('Log In') || text === 'Submit') {
+            await btn.click();
+            break;
+          }
+        }
+
+        await randomDelay(5000, 8000);
+      }
     }
-
-    // Fill password
-    const passInput = page.locator('input[type="password"]').first();
-    await passInput.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
-    if (await passInput.isVisible().catch(() => false)) {
-      await passInput.fill(process.env.MGM_PASSWORD);
-      await page.waitForTimeout(500);
-
-      const submitBtn = page.locator('button[type="submit"], button:has-text("Sign In"), button:has-text("Log In")').first();
-      await submitBtn.click();
-    }
-
-    await page.waitForTimeout(5000);
+  } catch (e) {
+    console.log('  Login flow issue:', e.message);
   }
 
   console.log('  URL after login:', page.url());
 }
 
-// ── Rewards ─────────────────────────────────────────────────────────────────
 async function scrapeRewards(page) {
   console.log('📊 Scraping MGM rewards...');
 
   if (!page.url().includes('/rewards')) {
-    await page.goto('https://www.mgmresorts.com/rewards/', {
-      waitUntil: 'networkidle', timeout: 30000
-    });
+    await humanNavigate(page, 'https://www.mgmresorts.com/rewards/');
   }
-  await page.waitForTimeout(3000);
+  await randomDelay(2000, 4000);
 
   const data = await page.evaluate(() => {
     const text = document.body.innerText;
 
-    // Tier status
     const tierMatch = text.match(/(Sapphire|Pearl|Gold|Platinum|Noir)/i);
-
-    // Tier credits
     const tcMatch = text.match(/([\d,]+)\s*Tier Credits/i);
-
-    // To next tier
     const toNextMatch = text.match(/([\d,]+)\s*to advance to\s+(\w+)/i);
-
-    // MGM Rewards Points
     const pointsMatch = text.match(/MGM Rewards Points\s*([\d,]+)/i) ||
                         text.match(/([\d,]+)\s*\$[\d.]+\s*in comps/i);
     const compsMatch = text.match(/\$([\d.]+)\s*in comps/i);
-
-    // FreePlay
     const freeplayMatch = text.match(/FREEPLAY[®]?\s*\$([\d.]+)/i);
-
-    // Slot Dollars
     const slotMatch = text.match(/SLOT DOLLARS[®]?\s*\$([\d.]+)/i);
-
-    // Holiday Gift Points
     const giftMatch = text.match(/Holiday Gift Points\s*([\d,.]+)/i);
-
-    // Milestone Rewards
     const milestoneMatch = text.match(/(\d+)\s*Milestone Rewards/i);
 
     return {
@@ -128,55 +110,44 @@ async function scrapeRewards(page) {
   return data;
 }
 
-// ── Trips ───────────────────────────────────────────────────────────────────
 async function scrapeTrips(page) {
   console.log('📋 Scraping MGM trips...');
-  await page.goto('https://www.mgmresorts.com/trips/', {
-    waitUntil: 'networkidle', timeout: 30000
-  });
-  await page.waitForTimeout(3000);
+  await humanNavigate(page, 'https://www.mgmresorts.com/trips/');
+  await randomDelay(2000, 3000);
 
   const trips = [];
 
-  // Check both upcoming and past tabs
   for (const tab of ['Upcoming', 'Past']) {
-    const tabBtn = page.locator(`text=${tab}`).first();
-    if (await tabBtn.isVisible().catch(() => false)) {
-      await tabBtn.click();
-      await page.waitForTimeout(2000);
+    try {
+      await page.evaluate((t) => {
+        const els = [...document.querySelectorAll('a, button, span')];
+        const el = els.find(e => e.textContent.trim() === t);
+        if (el) el.click();
+      }, tab);
+      await randomDelay(2000, 3000);
 
       const tabTrips = await page.evaluate((currentTab) => {
         const text = document.body.innerText;
-        // If there are no trips, it shows "Make some new memories"
         if (text.includes('Make some new memories')) return [];
-
         const results = [];
-        // Parse trip cards — structure TBD based on actual data
-        // MGM trips show: property, dates, confirmation code
         const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-
         for (let i = 0; i < lines.length; i++) {
           const confMatch = lines[i].match(/Confirmation[:\s#]+([A-Z0-9]+)/i);
           if (confMatch) {
-            results.push({
-              confirmationCode: confMatch[1],
-              tab: currentTab.toLowerCase(),
-            });
+            results.push({ confirmationCode: confMatch[1], tab: currentTab.toLowerCase() });
           }
         }
-
         return results;
       }, tab);
 
       trips.push(...tabTrips);
-    }
+    } catch (e) {}
   }
 
   console.log(`  Found ${trips.length} trips`);
   return trips;
 }
 
-// ── Save Functions ──────────────────────────────────────────────────────────
 async function saveSnapshot(data) {
   const { error } = await supabase.from('mgm_rewards_snapshots').insert({
     tier_status: data.tierStatus,

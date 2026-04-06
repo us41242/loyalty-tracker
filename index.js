@@ -1,21 +1,17 @@
 require('dotenv').config();
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./scrapers/browser');
 const { scrapeCaesars } = require('./scrapers/caesars');
 const { scrapeRio } = require('./scrapers/rio');
 const { scrapeMGM } = require('./scrapers/mgm');
 
 async function main() {
   const startTime = Date.now();
-  console.log('🚀 Casino Rewards Scraper');
+  console.log('🚀 Casino Rewards Scraper (Stealth Mode)');
   console.log(`   ${new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })} PT\n`);
 
-  const browser = await chromium.launch({
-    headless: process.env.CI === 'true',  // headless in CI, visible locally
-    slowMo: process.env.CI === 'true' ? 0 : 300,
-  });
+  const browser = await launchBrowser();
 
   try {
-    // Run scrapers sequentially (each manages its own browser context)
     await scrapeCaesars(browser);
     await scrapeRio(browser);
     await scrapeMGM(browser);

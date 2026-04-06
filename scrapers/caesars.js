@@ -1,38 +1,25 @@
 const { supabase, parseDate } = require('./db');
 const { fetch2FACode } = require('./gmail');
+const { createPage, humanType, humanClick, humanNavigate, randomDelay, humanScroll } = require('./browser');
 
 async function scrapeCaesars(browser) {
   console.log('\n═══════════════════════════════════════');
   console.log('  CAESARS REWARDS SCRAPER');
   console.log('═══════════════════════════════════════\n');
 
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  });
-  const page = await context.newPage();
+  const page = await createPage(browser);
 
   try {
-    // 1. Login
     await login(page);
-
-    // 2. Check for 2FA right after login
     await handle2FA(page);
 
-    // 3. Scrape rewards home
     const rewards = await scrapeRewardsHome(page);
-
-    // 4. Scrape reservations
     const pastRes = await scrapeReservations(page, 'past');
     const currentRes = await scrapeReservations(page, 'current');
-
-    // 5. Scrape offers (first page only for daily check)
     const offers = await scrapeOffers(page);
-
-    // 6. Scrape Great Gift (triggers 2FA)
-    const greatGift = await scrapeGreatGift(page, gmailToken);
+    const greatGift = await scrapeGreatGift(page);
     rewards.greatGiftPoints = greatGift;
 
-    // 7. Save to Supabase
     await saveSnapshot(rewards);
     await saveReservations([...pastRes, ...currentRes]);
     await saveOffers(offers);
@@ -41,41 +28,79 @@ async function scrapeCaesars(browser) {
   } catch (err) {
     console.error('❌ Caesars error:', err.message);
   } finally {
-    await context.close();
+    await page.close();
   }
 }
 
 // ── Login ───────────────────────────────────────────────────────────────────
 async function login(page) {
   console.log('🔑 Logging in...');
-  await page.goto('https://www.caesars.com/myrewards/profile/signin/', {
-    waitUntil: 'networkidle', timeout: 30000
-  });
+  await humanNavigate(page, 'https://www.caesars.com/myrewards/profile/signin/');
 
-  await page.waitForSelector('input', { timeout: 15000 });
-  await page.waitForTimeout(2000);
+  // Wait for the form to render (React SPA)
+  await page.waitForSelector('input', { timeout: 20000 });
+  await randomDelay(2000, 4000);
 
-  // Username field
-  const inputs = page.locator('input');
-  const inputCount = await inputs.count();
+  // Find and fill username — try multiple selectors
+  const usernameSelectors = [
+    'input[type="text"]',
+    'input[type="email"]',
+    'input[name="email"]',
+    'input[name="username"]',
+    'input:not([type="password"]):not([type="hidden"])',
+  ];
 
-  // Find the text/email input (not password)
-  for (let i = 0; i < inputCount; i++) {
-    const type = await inputs.nth(i).getAttribute('type');
-    if (type === 'text' || type === 'email' || !type) {
-      await inputs.nth(i).fill(process.env.CAESARS_USERNAME);
-      break;
-    }
+  let filled = false;
+  for (const sel of usernameSelectors) {
+    try {
+      const el = await page.$(sel);
+      if (el) {
+        const isVisible = await page.evaluate(e => {
+          const rect = e.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        }, el);
+        if (isVisible) {
+          await humanType(page, sel, process.env.CAESARS_USERNAME);
+          filled = true;
+          break;
+        }
+      }
+    } catch (e) { continue; }
   }
 
-  // Password
-  await page.locator('input[type="password"]').fill(process.env.CAESARS_PASSWORD);
-  await page.waitForTimeout(500);
+  if (!filled) throw new Error('Could not find username input');
 
-  // Submit
-  await page.locator('button[type="submit"], button:has-text("SIGN IN"), button:has-text("Sign In")').first().click();
+  await randomDelay(500, 1200);
 
-  await page.waitForTimeout(5000);
+  // Fill password
+  await humanType(page, 'input[type="password"]', process.env.CAESARS_PASSWORD);
+  await randomDelay(800, 1800);
+
+  // Click sign in
+  const signInSelectors = [
+    'button[type="submit"]',
+    'button:nth-of-type(1)',
+  ];
+
+  for (const sel of signInSelectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        const text = await page.evaluate(e => e.textContent, btn);
+        if (text && (text.includes('SIGN IN') || text.includes('Sign In') || text.includes('Log In'))) {
+          await humanClick(page, sel);
+          break;
+        }
+      }
+    } catch (e) { continue; }
+  }
+
+  // Fallback: click any submit button
+  try {
+    await humanClick(page, 'button[type="submit"]');
+  } catch (e) {}
+
+  await randomDelay(4000, 7000);
   console.log('  URL after login:', page.url());
 }
 
@@ -85,36 +110,40 @@ async function handle2FA(page) {
 
   console.log('🔐 2FA required...');
   await page.waitForSelector('input[maxlength="1"]', { timeout: 10000 });
-
-  // Wait a bit for the email to arrive
-  await page.waitForTimeout(10000);
+  await randomDelay(8000, 12000); // Wait for email to arrive
 
   const code = await fetch2FACode();
   if (!code) throw new Error('Could not get 2FA code');
 
   console.log(`  Entering code: ${code}`);
-  const codeInputs = page.locator('input[maxlength="1"]');
-  for (let i = 0; i < 6; i++) {
-    await codeInputs.nth(i).fill(code[i]);
-    await page.waitForTimeout(200);
+  const inputs = await page.$$('input[maxlength="1"]');
+
+  for (let i = 0; i < Math.min(code.length, inputs.length); i++) {
+    await inputs[i].click();
+    await randomDelay(100, 300);
+    await page.keyboard.type(code[i], { delay: Math.floor(Math.random() * 100) + 80 });
+    await randomDelay(200, 500);
   }
 
-  await page.waitForTimeout(3000);
-  await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+  await randomDelay(2000, 4000);
+
+  // Wait for redirect
+  try {
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 });
+  } catch (e) {}
+
+  await randomDelay(2000, 3000);
   console.log('  ✅ 2FA complete');
 }
 
 // ── Rewards Home ────────────────────────────────────────────────────────────
 async function scrapeRewardsHome(page) {
   console.log('📊 Scraping rewards home...');
-  await page.goto('https://www.caesars.com/rewards/home', {
-    waitUntil: 'networkidle', timeout: 30000
-  });
-  await page.waitForTimeout(3000);
+  await humanNavigate(page, 'https://www.caesars.com/rewards/home');
+  await randomDelay(2000, 4000);
 
   const data = await page.evaluate(() => {
     const text = document.body.innerText;
-
     const rc = text.match(/([\d,]+)\s*REWARD CREDITS/i);
     const tc = text.match(/([\d,]+)\s*TIER CREDITS/i);
     const ts = text.match(/(SEVEN STARS|DIAMOND ELITE|DIAMOND PLUS|DIAMOND|PLATINUM|GOLD)/i);
@@ -140,17 +169,18 @@ async function scrapeRewardsHome(page) {
 // ── Reservations ────────────────────────────────────────────────────────────
 async function scrapeReservations(page, tab) {
   console.log(`📋 Scraping ${tab} reservations...`);
-  await page.goto('https://www.caesars.com/rewards/stays', {
-    waitUntil: 'networkidle', timeout: 30000
-  });
-  await page.waitForTimeout(2000);
+  await humanNavigate(page, 'https://www.caesars.com/rewards/stays');
 
   // Click tab
-  const tabBtn = page.locator(`text=${tab.toUpperCase()}`).first();
-  if (await tabBtn.isVisible()) {
-    await tabBtn.click();
-    await page.waitForTimeout(2000);
-  }
+  try {
+    const tabText = tab.toUpperCase();
+    await page.evaluate((t) => {
+      const links = [...document.querySelectorAll('a, button, span')];
+      const el = links.find(l => l.textContent.trim() === t);
+      if (el) el.click();
+    }, tabText);
+    await randomDelay(2000, 3000);
+  } catch (e) {}
 
   const reservations = await page.evaluate((currentTab) => {
     const cards = [];
@@ -182,52 +212,60 @@ async function scrapeReservations(page, tab) {
 // ── Offers ──────────────────────────────────────────────────────────────────
 async function scrapeOffers(page) {
   console.log('🎁 Scraping offers...');
-  await page.goto('https://www.caesars.com/rewards/offers', {
-    waitUntil: 'networkidle', timeout: 30000
-  });
-  await page.waitForTimeout(3000);
+  await humanNavigate(page, 'https://www.caesars.com/rewards/offers');
+  await randomDelay(2000, 4000);
 
   // Clear filters
-  const clearBtn = page.locator('text=Clear Filters');
-  if (await clearBtn.isVisible().catch(() => false)) {
-    await clearBtn.click();
-    await page.waitForTimeout(2000);
-  }
-
-  // Expand all "See More" sections
-  for (let i = 0; i < 10; i++) {
-    const seeMore = page.locator('button:has-text("See More"), a:has-text("See More")').first();
-    if (await seeMore.isVisible().catch(() => false)) {
-      await seeMore.click();
-      await page.waitForTimeout(2000);
-    } else {
-      break;
+  try {
+    const clearBtn = await page.$('button, a');
+    const buttons = await page.$$('button, a');
+    for (const btn of buttons) {
+      const text = await page.evaluate(e => e.textContent.trim(), btn);
+      if (text === 'Clear Filters') {
+        await btn.click();
+        await randomDelay(2000, 3000);
+        break;
+      }
     }
+  } catch (e) {}
+
+  // Click "See More" buttons to expand sections
+  for (let i = 0; i < 10; i++) {
+    try {
+      const buttons = await page.$$('button, a');
+      let found = false;
+      for (const btn of buttons) {
+        const text = await page.evaluate(e => e.textContent.trim(), btn);
+        if (text.includes('See More')) {
+          await btn.click();
+          await randomDelay(1500, 3000);
+          await humanScroll(page, 300);
+          found = true;
+          break;
+        }
+      }
+      if (!found) break;
+    } catch (e) { break; }
   }
 
-  // Scrape all offer cards visible on the page
+  // Extract offer data from page
   const offers = await page.evaluate(() => {
     const results = [];
     const text = document.body.innerText;
-
-    // Find section headers and their offers
     let currentSection = 'Unknown';
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
     for (let i = 0; i < lines.length; i++) {
-      // Detect section headers like "EXPIRING IN THE NEXT 7 DAYS (21)" or "APRIL OFFERS (58)"
       const sectionMatch = lines[i].match(/^(EXPIRING.*?|(?:JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+OFFERS?)\s*\((\d+)\)/i);
       if (sectionMatch) {
         currentSection = sectionMatch[1].trim();
         continue;
       }
 
-      // Detect offer lines — typically "Expires today" or "Valid MM.DD.YY - MM.DD.YY"
-      const expiresMatch = lines[i].match(/Expires?\s+(today|tomorrow|\d.+)/i);
-      const validMatch = lines[i].match(/Valid\s+(\d.+)/i);
+      const expiresMatch = lines[i].match(/^Expires?\s+(today|tomorrow|\d.+)/i);
+      const validMatch = lines[i].match(/^Valid\s+(\d.+)/i);
 
       if (expiresMatch || validMatch) {
-        // The title is usually 1-3 lines above
         let title = '';
         for (let j = i - 1; j >= Math.max(0, i - 4); j--) {
           if (lines[j].match(/^(EXPIRING|JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)/i)) break;
@@ -236,9 +274,8 @@ async function scrapeOffers(page) {
           break;
         }
 
-        // Property is usually between title and dates
         let property = '';
-        if (i > 1 && !lines[i - 1].match(/^[A-Z\$\d]/)) {
+        if (i >= 2 && !lines[i - 1].match(/^[A-Z\$\d]/) && lines[i - 1] !== title) {
           property = lines[i - 1];
         }
 
@@ -250,45 +287,8 @@ async function scrapeOffers(page) {
         });
       }
     }
-
     return results;
   });
-
-  // Click each offer to get offer ID and details
-  // For efficiency on daily runs, only process new offers
-  const detailedOffers = [];
-  const offerCards = page.locator('[class*="offer"] a, [class*="Offer"] a, [data-testid*="offer"]');
-  const cardCount = await offerCards.count().catch(() => 0);
-
-  // For each visible card, try to click and get details
-  for (let i = 0; i < Math.min(cardCount, 50); i++) {
-    try {
-      await offerCards.nth(i).click();
-      await page.waitForTimeout(1000);
-
-      const detail = await page.evaluate(() => {
-        // Look for the detail panel/sidebar
-        const text = document.body.innerText;
-        const offerIdMatch = text.match(/Offer[:\s]+([A-Z0-9]{8,})/i);
-        return {
-          offerId: offerIdMatch ? offerIdMatch[1] : null,
-        };
-      });
-
-      if (detail.offerId && offers[i]) {
-        offers[i].offerId = detail.offerId;
-      }
-
-      // Close the panel
-      const closeBtn = page.locator('button[aria-label="Close"], [class*="close"] button').first();
-      if (await closeBtn.isVisible().catch(() => false)) {
-        await closeBtn.click();
-        await page.waitForTimeout(500);
-      }
-    } catch (e) {
-      // Skip offers we can't click
-    }
-  }
 
   console.log(`  Found ${offers.length} offers`);
   return offers;
@@ -297,34 +297,40 @@ async function scrapeOffers(page) {
 // ── Great Gift ──────────────────────────────────────────────────────────────
 async function scrapeGreatGift(page) {
   console.log('🎄 Scraping Great Gift...');
-
-  // Navigate through: caesars.com promotions > Great Gift Wrap Up > Shop Now
-  // This triggers 2FA on the external site
   try {
-    await page.goto('https://www.caesars.com/rewards/offers', {
-      waitUntil: 'networkidle', timeout: 30000
-    });
-    await page.waitForTimeout(2000);
+    // Navigate to promotions and find Great Gift link
+    await humanNavigate(page, 'https://www.caesars.com/rewards/offers');
+    await randomDelay(2000, 3000);
 
-    // Look for Great Gift link
-    const giftLink = page.locator('a:has-text("Great Gift"), a:has-text("Gift Wrap")').first();
-    if (await giftLink.isVisible().catch(() => false)) {
-      await giftLink.click();
-      await page.waitForTimeout(3000);
+    // Look for Great Gift / Gift Wrap link
+    const links = await page.$$('a');
+    for (const link of links) {
+      const text = await page.evaluate(e => e.textContent, link);
+      if (text && (text.includes('Great Gift') || text.includes('Gift Wrap'))) {
+        await link.click();
+        await randomDelay(3000, 5000);
 
-      // Look for Shop Now
-      const shopLink = page.locator('a:has-text("Shop Now")').first();
-      if (await shopLink.isVisible().catch(() => false)) {
-        await shopLink.click();
-        await page.waitForTimeout(5000);
+        // Look for Shop Now
+        const shopLinks = await page.$$('a');
+        for (const sl of shopLinks) {
+          const st = await page.evaluate(e => e.textContent, sl);
+          if (st && st.includes('Shop Now')) {
+            await sl.click();
+            await randomDelay(5000, 8000);
+            break;
+          }
+        }
+        break;
       }
     }
 
     // Handle 2FA if triggered
-    await handle2FA(page);
+    if (page.url().includes('/verification/step-up')) {
+      await handle2FA(page);
+    }
 
-    // Extract points from the Great Gift page
-    await page.waitForTimeout(3000);
+    await randomDelay(3000, 5000);
+
     const points = await page.evaluate(() => {
       const text = document.body.innerText;
       const match = text.match(/Great Gift Points Balance:\s*([\d,]+)/i);
@@ -377,25 +383,14 @@ async function saveReservations(reservations) {
 async function saveOffers(offers) {
   let saved = 0;
   for (const o of offers) {
-    if (!o.offerId) continue;
-
-    // Parse dates from "Valid MM.DD.YY - MM.DD.YY" format
-    let validStart = null, validEnd = null;
-    if (o.dates) {
-      const datesMatch = o.dates.match(/(\d{2}[.\/-]\d{2}[.\/-]\d{2,4})\s*[-–]\s*(\d{2}[.\/-]\d{2}[.\/-]\d{2,4})/);
-      if (datesMatch) {
-        validStart = parseDate(datesMatch[1]);
-        validEnd = parseDate(datesMatch[2]);
-      }
-    }
+    const offerId = o.offerId || `${o.title}-${o.dates}`.replace(/\s+/g, '-').substring(0, 50);
+    if (!offerId || !o.title) continue;
 
     const { error } = await supabase.from('caesars_offers').upsert({
-      offer_id: o.offerId,
+      offer_id: offerId,
       title: o.title,
       section: o.section,
       eligible_properties: o.property,
-      valid_start: validStart,
-      valid_end: validEnd,
       last_seen: new Date().toISOString(),
     }, { onConflict: 'offer_id' });
     if (!error) saved++;
