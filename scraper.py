@@ -865,8 +865,27 @@ def main():
     options = uc.ChromeOptions()
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--lang=en-US')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    if os.environ.get('CI'):
+        options.add_argument('--headless=new')
 
-    driver = uc.Chrome(options=options, use_subprocess=True, version_main=146)
+    # Detect Chrome version automatically; fall back to manual if needed
+    try:
+        import subprocess
+        result = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
+        if result.returncode != 0:
+            result = subprocess.run(['chromium', '--version'], capture_output=True, text=True)
+        ver_match = re.search(r'(\d+)\.', result.stdout)
+        chrome_ver = int(ver_match.group(1)) if ver_match else None
+    except:
+        chrome_ver = None
+
+    if chrome_ver:
+        print(f"  Detected Chrome version: {chrome_ver}")
+        driver = uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
+    else:
+        driver = uc.Chrome(options=options, use_subprocess=True)
 
     try:
         scrape_caesars(driver)
