@@ -443,7 +443,7 @@ def scrape_caesars_reservations(driver, tab='past'):
 def scrape_caesars_offers(driver):
     print("🎁 Scraping offers...")
     driver.get('https://www.caesars.com/rewards/offers')
-    human_delay(3, 5)
+    human_delay(4, 6)
 
     # Clear filters
     try:
@@ -458,81 +458,132 @@ def scrape_caesars_offers(driver):
 
     human_delay(2, 3)
 
-    # Step 1: Collect "See More" links to visit each section
-    see_more_links = driver.execute_script("""
-        var links = document.querySelectorAll('a');
-        var results = [];
-        for (var i = 0; i < links.length; i++) {
-            if (links[i].textContent.trim().includes('See More') && links[i].href) {
-                results.push(links[i].href);
-            }
-        }
-        return results;
-    """)
+    # Scroll down to make all sections visible
+    for _ in range(5):
+        driver.execute_script("window.scrollBy(0, 800);")
+        human_delay(1, 2)
+    driver.execute_script("window.scrollTo(0, 0);")
+    human_delay(1, 2)
+
+    # Step 1: Find "See More" links using the known XPath pattern
+    # The sections are at: ...div[3]/div[2]/div[N]/div[1]/div[2]
+    # where N = 1 (expiring), 2 (april), 3 (may), 4 (june), etc.
+    base_xpath = '//*[@id="root"]/div/div/div/div/div[1]/div/div/div/div/div[2]/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div[1]/div/div/div/div[2]/div[2]/div/div[2]/div/div[1]/div/div/div/div[3]/div/div[2]/div/div/div/div/div/div/div[3]/div[2]'
+
+    section_names = [
+        'EXPIRING IN THE NEXT 7 DAYS',
+        'APRIL OFFERS',
+        'MAY OFFERS',
+        'JUNE OFFERS',
+        'JULY OFFERS',
+        'AUGUST OFFERS',
+        'SEPTEMBER OFFERS',
+        'OCTOBER OFFERS',
+    ]
+
+    see_more_links = []
+    for idx in range(1, 10):
+        try:
+            xpath = f'{base_xpath}/div[{idx}]/div[1]/div[2]'
+            el = driver.find_element(By.XPATH, xpath)
+            if el.is_displayed():
+                # Get the href from a link inside or nearby
+                link_el = el.find_element(By.TAG_NAME, 'a') if el.tag_name != 'a' else el
+                href = link_el.get_attribute('href') or ''
+                name = section_names[idx-1] if idx-1 < len(section_names) else f'SECTION {idx}'
+                see_more_links.append({'href': href, 'name': name, 'xpath': xpath})
+                print(f"  Found section: {name} -> {href[:60]}")
+        except:
+            break
+
+    # Fallback: try finding "See More" links by text
+    if not see_more_links:
+        print("  XPath sections not found, trying text search...")
+        links = driver.find_elements(By.TAG_NAME, 'a')
+        for link in links:
+            try:
+                text = link.text.strip()
+                href = link.get_attribute('href') or ''
+                if 'See More' in text and href and 'offers' in href.lower():
+                    see_more_links.append({'href': href, 'name': text, 'xpath': ''})
+                    print(f"  Found link: {text} -> {href[:60]}")
+            except:
+                continue
+
+    # Also try aria-label elements
+    if not see_more_links:
+        print("  Trying aria-label search...")
+        all_elements = driver.find_elements(By.CSS_SELECTOR, '[aria-label]')
+        for el in all_elements:
+            label = el.get_attribute('aria-label') or ''
+            if 'see more' in label.lower() or 'expiring' in label.lower():
+                href = el.get_attribute('href') or ''
+                print(f"  Found aria-label: {label} -> {href[:60]}")
+
     print(f"  Found {len(see_more_links)} sections")
 
-    # Step 2: Also scrape offers visible on the main page
+    # Step 2: Scrape offers from the main page first
     all_offers = scrape_offers_from_current_page(driver, 'MAIN PAGE')
+    print(f"  Main page: {len(all_offers)} offers")
 
     # Step 3: Visit each section and scrape all pages
-    for link in see_more_links:
-        section_name = ''
-        # Extract section name from URL
-        if 'expiring' in link.lower():
-            section_name = 'EXPIRING IN THE NEXT 7 DAYS'
-        else:
-            # Try to get month name from URL
-            for month in ['january','february','march','april','may','june','july','august','september','october','november','december']:
-                if month in link.lower():
-                    section_name = f'{month.upper()} OFFERS'
-                    break
-            if not section_name:
-                section_name = link.split('=')[-1].replace('-', ' ').upper() if '=' in link else 'UNKNOWN'
+    for section in see_more_links:
+        href = section['href']
+        name = section['name']
 
-        print(f"  📂 Scraping section: {section_name}...")
-        driver.get(link)
-        human_delay(3, 5)
-
-        # Scrape this page
-        page_offers = scrape_offers_from_current_page(driver, section_name)
-        all_offers.extend(page_offers)
-
-        # Handle pagination — click through all pages
-        page_num = 1
-        while True:
-            page_num += 1
+        if not href:
+            # Try clicking the element directly
             try:
-                # Look for next page button or numbered page link
-                next_clicked = driver.execute_script("""
-                    // Try numbered page links
-                    var links = document.querySelectorAll('a, button');
-                    for (var i = 0; i < links.length; i++) {
-                        var text = links[i].textContent.trim();
-                        if (text === '""" + str(page_num) + """' && links[i].offsetWidth > 0) {
-                            links[i].click();
-                            return true;
+                el = driver.find_element(By.XPATH, section['xpath'])
+                el.click()
+                human_delay(3, 5)
+                href = driver.current_url
+            except:
+                continue
+
+        if href:
+            print(f"  📂 Section: {name}...")
+            driver.get(href)
+            human_delay(3, 5)
+
+            page_offers = scrape_offers_from_current_page(driver, name)
+            all_offers.extend(page_offers)
+            print(f"    Page 1: {len(page_offers)} offers")
+
+            # Handle pagination
+            page_num = 1
+            while True:
+                page_num += 1
+                next_clicked = False
+                try:
+                    next_clicked = driver.execute_script("""
+                        var links = document.querySelectorAll('a, button');
+                        for (var i = 0; i < links.length; i++) {
+                            var text = links[i].textContent.trim();
+                            if (text === '""" + str(page_num) + """' && links[i].offsetWidth > 0) {
+                                links[i].click();
+                                return true;
+                            }
                         }
-                    }
-                    // Try "Next" or ">" button
-                    for (var i = 0; i < links.length; i++) {
-                        var text = links[i].textContent.trim();
-                        if ((text === 'Next' || text === '>' || text === '›') && links[i].offsetWidth > 0) {
-                            links[i].click();
-                            return true;
+                        for (var i = 0; i < links.length; i++) {
+                            var text = links[i].textContent.trim();
+                            if ((text === 'Next' || text === '>' || text === '›' || text === '»') && links[i].offsetWidth > 0) {
+                                links[i].click();
+                                return true;
+                            }
                         }
-                    }
-                    return false;
-                """)
+                        return false;
+                    """)
+                except:
+                    break
                 if not next_clicked:
                     break
                 human_delay(2, 4)
-                page_offers = scrape_offers_from_current_page(driver, section_name)
+                page_offers = scrape_offers_from_current_page(driver, name)
                 if not page_offers:
                     break
                 all_offers.extend(page_offers)
                 print(f"    Page {page_num}: {len(page_offers)} offers")
-            except:
-                break
 
     # Deduplicate by title+dates
     seen = set()
