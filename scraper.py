@@ -519,7 +519,7 @@ def scrape_caesars_offers(driver):
     print(f"  Found {section_count} sections")
 
     # Check how many offer cards are on the main page
-    main_testid_count = driver.execute_script("return document.querySelectorAll('[data-testid=\"offer-details\"]').length")
+    main_testid_count = driver.execute_script("return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
     print(f"  Main page offer-details count: {main_testid_count}")
 
     # Scrape all visible offers on the main page first
@@ -556,7 +556,7 @@ def scrape_caesars_offers(driver):
 
         # Wait for offer cards to render on section page
         for wait_i in range(5):
-            count = driver.execute_script("return document.querySelectorAll('[data-testid=\"offer-details\"]').length")
+            count = driver.execute_script("return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
             if count > 0:
                 break
             human_delay(2, 3)
@@ -569,7 +569,7 @@ def scrape_caesars_offers(driver):
         if not page_offers:
             text = driver.find_element(By.TAG_NAME, 'body').text[:400]
             # Also check for data-testid count
-            testid_count = driver.execute_script("return document.querySelectorAll('[data-testid=\"offer-details\"]').length")
+            testid_count = driver.execute_script("return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
             print(f"    DEBUG: data-testid count={testid_count}, text={text[:150]}")
 
         # Handle pagination within the section
@@ -621,9 +621,9 @@ def scrape_caesars_offers(driver):
     return unique_offers
 
 def scrape_offers_from_current_page(driver, section_name):
-    """Extract offers using data-testid='offer-details' elements."""
+    """Extract offers from offer cards (aria-label='Open Offer Details')."""
     offers = driver.execute_script("""
-        var cards = document.querySelectorAll('[data-testid="offer-details"]');
+        var cards = document.querySelectorAll('[aria-label="Open Offer Details"]');
         var results = [];
         for (var i = 0; i < cards.length; i++) {
             var card = cards[i];
