@@ -510,15 +510,17 @@ def scrape_caesars_offers(driver):
             except:
                 continue
 
-    # Also try aria-label elements
+    # Try aria-label elements — these are clickable divs, not <a> links
     if not see_more_links:
         print("  Trying aria-label search...")
-        all_elements = driver.find_elements(By.CSS_SELECTOR, '[aria-label]')
+        all_elements = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"], [aria-label*="see more"]')
         for el in all_elements:
             label = el.get_attribute('aria-label') or ''
-            if 'see more' in label.lower() or 'expiring' in label.lower():
-                href = el.get_attribute('href') or ''
-                print(f"  Found aria-label: {label} -> {href[:60]}")
+            if label:
+                # Extract section name from aria-label (e.g., "See more APRIL OFFERS")
+                name = label.replace('See more ', '').replace('see more ', '').strip()
+                see_more_links.append({'href': '', 'name': name, 'xpath': '', 'element_label': label})
+                print(f"  Found aria-label: {label}")
 
     print(f"  Found {len(see_more_links)} sections")
 
@@ -532,19 +534,27 @@ def scrape_caesars_offers(driver):
         name = section['name']
 
         if not href:
-            # Try clicking the element directly
+            # Click the element directly (aria-label or xpath)
             try:
-                el = driver.find_element(By.XPATH, section['xpath'])
-                el.click()
+                if section.get('element_label'):
+                    el = driver.find_element(By.CSS_SELECTOR, f'[aria-label="{section["element_label"]}"]')
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                    human_delay(0.5, 1)
+                    el.click()
+                elif section.get('xpath'):
+                    el = driver.find_element(By.XPATH, section['xpath'])
+                    el.click()
+                else:
+                    continue
                 human_delay(3, 5)
-                href = driver.current_url
-            except:
+            except Exception as e:
+                print(f"  ⚠️ Could not click section {name}: {e}")
                 continue
-
-        if href:
-            print(f"  📂 Section: {name}...")
+        else:
             driver.get(href)
             human_delay(3, 5)
+
+        print(f"  📂 Section: {name} (URL: {driver.current_url[:60]})")
 
             page_offers = scrape_offers_from_current_page(driver, name)
             all_offers.extend(page_offers)
