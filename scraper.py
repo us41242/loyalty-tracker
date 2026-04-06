@@ -26,6 +26,11 @@ from supabase import create_client
 # ── Config ───────────────────────────────────────────────────────────────────
 supabase = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 
+# Shared run timestamp in Pacific time
+from datetime import timezone, timedelta
+PACIFIC = timezone(timedelta(hours=-7))  # PDT
+RUN_TS = datetime.now(PACIFIC).isoformat()
+
 # ── Cookie Session Management ────────────────────────────────────────────────
 def save_cookies(driver, site):
     """Save browser cookies to Supabase for reuse across runs."""
@@ -836,6 +841,7 @@ def scrape_mgm_trips(driver):
 
 def save_caesars_snapshot(data):
     result = supabase.table('caesars_rewards_snapshots').insert({
+        'run_ts': RUN_TS,
         'reward_credits': data.get('reward_credits'),
         'tier_credits': data.get('tier_credits'),
         'tier_status': data.get('tier_status'),
@@ -852,6 +858,7 @@ def save_caesars_reservations(reservations):
         if not r.get('confirmation_code'):
             continue
         supabase.table('caesars_reservations').upsert({
+            'run_ts': RUN_TS,
             'confirmation_code': r['confirmation_code'],
             'property': r.get('property'),
             'location': r.get('location'),
@@ -871,6 +878,7 @@ def save_caesars_offers(offers):
         if not o.get('offer_id') or not o.get('title'):
             continue
         supabase.table('caesars_offers').upsert({
+            'run_ts': RUN_TS,
             'offer_id': o['offer_id'],
             'title': o['title'],
             'section': o.get('section'),
@@ -881,6 +889,7 @@ def save_caesars_offers(offers):
 
 def save_rio_snapshot(data):
     supabase.table('rio_rewards_snapshots').insert({
+        'run_ts': RUN_TS,
         'tier_status': data.get('tier_status'),
         'member_number': data.get('member_number'),
         'points_balance': data.get('points_balance'),
@@ -902,6 +911,7 @@ def save_rio_offers(offers):
         valid_end = parse_date(parts[1]) if len(parts) > 1 else None
         try:
             supabase.table('rio_offers').upsert({
+                'run_ts': RUN_TS,
                 'title': o['title'],
                 'valid_start': valid_start,
                 'valid_end': valid_end,
@@ -914,6 +924,7 @@ def save_rio_offers(offers):
 
 def save_mgm_snapshot(data):
     supabase.table('mgm_rewards_snapshots').insert({
+        'run_ts': RUN_TS,
         'tier_status': data.get('tier_status'),
         'tier_credits': data.get('tier_credits'),
         'tier_credits_to_next': data.get('tier_credits_to_next'),
@@ -932,6 +943,7 @@ def save_mgm_trips(trips):
         if not t.get('confirmation_code'):
             continue
         supabase.table('mgm_trips').upsert({
+            'run_ts': RUN_TS,
             'confirmation_code': t['confirmation_code'],
             'tab': 'past',
             'updated_at': datetime.now().isoformat(),
