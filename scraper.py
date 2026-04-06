@@ -58,10 +58,14 @@ def load_cookies(driver, site, domain):
         updated = row['updated_at']
         print(f"  🍪 Loading {len(cookies)} cookies for {site} (saved: {updated[:19]})")
 
+        if not cookies:
+            return False
+
         # Navigate to the domain first so cookies can be set
         driver.get(f'https://{domain}/')
-        human_delay(2, 3)
+        human_delay(3, 5)
 
+        loaded = 0
         for cookie in cookies:
             # Remove problematic fields
             for key in ['sameSite', 'expiry', 'httpOnly', 'storeId']:
@@ -71,20 +75,30 @@ def load_cookies(driver, site, domain):
                 continue
             try:
                 driver.add_cookie(cookie)
+                loaded += 1
             except:
                 pass
 
-        return True
+        print(f"  🍪 Loaded {loaded}/{len(cookies)} cookies")
+        return loaded > 0
     except Exception as e:
         print(f"  🍪 Could not load cookies for {site}: {e}")
         return False
 
 def verify_session(driver, check_url, success_indicator):
     """Navigate to a page and check if we're logged in."""
-    driver.get(check_url)
-    human_delay(3, 5)
-    text = driver.find_element(By.TAG_NAME, 'body').text
-    return success_indicator.lower() in text.lower()
+    try:
+        driver.get(check_url)
+        human_delay(5, 8)
+        # Wait for body to be present
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+        )
+        text = driver.find_element(By.TAG_NAME, 'body').text
+        return success_indicator.lower() in text.lower()
+    except Exception as e:
+        print(f"  🍪 Session verify failed: {e}")
+        return False
 
 # ── Human-like helpers ───────────────────────────────────────────────────────
 def human_delay(min_s=1.0, max_s=3.0):
@@ -448,46 +462,139 @@ def scrape_caesars_offers(driver):
     except:
         pass
 
-    # Click See More buttons
-    for _ in range(10):
-        try:
-            see_more = [b for b in driver.find_elements(By.CSS_SELECTOR, 'button, a')
-                       if 'See More' in b.text and b.is_displayed()]
-            if see_more:
-                see_more[0].click()
-                human_delay(1.5, 3)
-            else:
-                break
-        except:
-            break
+    human_delay(2, 3)
 
+    # Step 1: Collect "See More" links to visit each section
+    see_more_links = driver.execute_script("""
+        var links = document.querySelectorAll('a');
+        var results = [];
+        for (var i = 0; i < links.length; i++) {
+            if (links[i].textContent.trim().includes('See More') && links[i].href) {
+                results.push(links[i].href);
+            }
+        }
+        return results;
+    """)
+    print(f"  Found {len(see_more_links)} sections")
+
+    # Step 2: Also scrape offers visible on the main page
+    all_offers = scrape_offers_from_current_page(driver, 'MAIN PAGE')
+
+    # Step 3: Visit each section and scrape all pages
+    for link in see_more_links:
+        section_name = ''
+        # Extract section name from URL
+        if 'expiring' in link.lower():
+            section_name = 'EXPIRING IN THE NEXT 7 DAYS'
+        else:
+            # Try to get month name from URL
+            for month in ['january','february','march','april','may','june','july','august','september','october','november','december']:
+                if month in link.lower():
+                    section_name = f'{month.upper()} OFFERS'
+                    break
+            if not section_name:
+                section_name = link.split('=')[-1].replace('-', ' ').upper() if '=' in link else 'UNKNOWN'
+
+        print(f"  📂 Scraping section: {section_name}...")
+        driver.get(link)
+        human_delay(3, 5)
+
+        # Scrape this page
+        page_offers = scrape_offers_from_current_page(driver, section_name)
+        all_offers.extend(page_offers)
+
+        # Handle pagination — click through all pages
+        page_num = 1
+        while True:
+            page_num += 1
+            try:
+                # Look for next page button or numbered page link
+                next_clicked = driver.execute_script("""
+                    // Try numbered page links
+                    var links = document.querySelectorAll('a, button');
+                    for (var i = 0; i < links.length; i++) {
+                        var text = links[i].textContent.trim();
+                        if (text === '""" + str(page_num) + """' && links[i].offsetWidth > 0) {
+                            links[i].click();
+                            return true;
+                        }
+                    }
+                    // Try "Next" or ">" button
+                    for (var i = 0; i < links.length; i++) {
+                        var text = links[i].textContent.trim();
+                        if ((text === 'Next' || text === '>' || text === '›') && links[i].offsetWidth > 0) {
+                            links[i].click();
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                if not next_clicked:
+                    break
+                human_delay(2, 4)
+                page_offers = scrape_offers_from_current_page(driver, section_name)
+                if not page_offers:
+                    break
+                all_offers.extend(page_offers)
+                print(f"    Page {page_num}: {len(page_offers)} offers")
+            except:
+                break
+
+    # Deduplicate by title+dates
+    seen = set()
+    unique_offers = []
+    for o in all_offers:
+        key = f"{o.get('title','')}-{o.get('dates','')}"
+        if key not in seen:
+            seen.add(key)
+            unique_offers.append(o)
+
+    print(f"  Found {len(unique_offers)} total unique offers")
+    return unique_offers
+
+def scrape_offers_from_current_page(driver, section_name):
+    """Extract offers from whatever page is currently loaded."""
     text = driver.find_element(By.TAG_NAME, 'body').text
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     offers = []
-    current_section = 'Unknown'
 
     for i, line in enumerate(lines):
-        sm = re.match(r'^(EXPIRING.*?|(?:JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+OFFERS?)\s*\(\d+\)', line, re.I)
-        if sm:
-            current_section = sm.group(1).strip()
-            continue
+        # Match date patterns: "Expires today", "Expires Tomorrow", "Valid MM.DD.YY - MM.DD.YY"
+        is_date = (re.match(r'^Expires?\s+(today|tomorrow|\d)', line, re.I) or
+                   re.match(r'^Valid\s+\d', line, re.I))
 
-        if re.match(r'^Expires?\s+(today|tomorrow|\d)', line, re.I) or re.match(r'^Valid\s+\d', line, re.I):
+        if is_date:
+            # Title is usually 1-3 lines above, skip property/location lines
             title = ''
-            for j in range(i-1, max(0, i-4), -1):
-                if not re.match(r'^(EXPIRING|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', lines[j], re.I):
-                    if not re.match(r'^(See More|Clear Filters|FILTER|DESTINATIONS)', lines[j], re.I):
+            property_name = ''
+            for j in range(i-1, max(0, i-5), -1):
+                if re.match(r'^(EXPIRING|JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)', lines[j], re.I):
+                    break
+                if re.match(r'^(See More|Clear Filters|FILTER|DESTINATIONS|DATES|OFFER TYPE|Page \d|›|‹|\d+$)', lines[j], re.I):
+                    break
+                # Property/location lines are usually short and contain "Las Vegas", "Resorts", etc.
+                if not title:
+                    # Check if this looks like a property name
+                    if any(kw in lines[j] for kw in ['Las Vegas', 'Resorts', 'Lake Tahoe', 'Palace', 'New Orleans', 'Atlantic']):
+                        property_name = lines[j]
+                    else:
                         title = lines[j]
-                        break
+                elif not property_name:
+                    if any(kw in lines[j] for kw in ['Las Vegas', 'Resorts', 'Lake Tahoe', 'Palace', 'New Orleans', 'Atlantic']):
+                        property_name = lines[j]
+                    else:
+                        title = lines[j]  # The real title was further up
+                break
+
             if title:
                 offers.append({
                     'title': title,
-                    'section': current_section,
+                    'section': section_name,
+                    'property': property_name,
                     'dates': line,
                     'offer_id': f"{title}-{line}".replace(' ', '-')[:50],
                 })
 
-    print(f"  Found {len(offers)} offers")
     return offers
 
 def scrape_caesars_great_gift(driver):
