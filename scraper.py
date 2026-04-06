@@ -556,44 +556,44 @@ def scrape_caesars_offers(driver):
 
         print(f"  📂 Section: {name} (URL: {driver.current_url[:60]})")
 
-            page_offers = scrape_offers_from_current_page(driver, name)
-            all_offers.extend(page_offers)
-            print(f"    Page 1: {len(page_offers)} offers")
+        page_offers = scrape_offers_from_current_page(driver, name)
+        all_offers.extend(page_offers)
+        print(f"    Page 1: {len(page_offers)} offers")
 
-            # Handle pagination
-            page_num = 1
-            while True:
-                page_num += 1
-                next_clicked = False
-                try:
-                    next_clicked = driver.execute_script("""
-                        var links = document.querySelectorAll('a, button');
-                        for (var i = 0; i < links.length; i++) {
-                            var text = links[i].textContent.trim();
-                            if (text === '""" + str(page_num) + """' && links[i].offsetWidth > 0) {
-                                links[i].click();
-                                return true;
-                            }
+        # Handle pagination
+        page_num = 1
+        while True:
+            page_num += 1
+            next_clicked = False
+            try:
+                next_clicked = driver.execute_script("""
+                    var links = document.querySelectorAll('a, button');
+                    for (var i = 0; i < links.length; i++) {
+                        var text = links[i].textContent.trim();
+                        if (text === '""" + str(page_num) + """' && links[i].offsetWidth > 0) {
+                            links[i].click();
+                            return true;
                         }
-                        for (var i = 0; i < links.length; i++) {
-                            var text = links[i].textContent.trim();
-                            if ((text === 'Next' || text === '>' || text === '›' || text === '»') && links[i].offsetWidth > 0) {
-                                links[i].click();
-                                return true;
-                            }
+                    }
+                    for (var i = 0; i < links.length; i++) {
+                        var text = links[i].textContent.trim();
+                        if ((text === 'Next' || text === '>' || text === '›' || text === '»') && links[i].offsetWidth > 0) {
+                            links[i].click();
+                            return true;
                         }
-                        return false;
-                    """)
-                except:
-                    break
-                if not next_clicked:
-                    break
-                human_delay(2, 4)
-                page_offers = scrape_offers_from_current_page(driver, name)
-                if not page_offers:
-                    break
-                all_offers.extend(page_offers)
-                print(f"    Page {page_num}: {len(page_offers)} offers")
+                    }
+                    return false;
+                """)
+            except:
+                break
+            if not next_clicked:
+                break
+            human_delay(2, 4)
+            page_offers = scrape_offers_from_current_page(driver, name)
+            if not page_offers:
+                break
+            all_offers.extend(page_offers)
+            print(f"    Page {page_num}: {len(page_offers)} offers")
 
     # Deduplicate by title+dates
     seen = set()
