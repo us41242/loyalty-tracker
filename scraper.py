@@ -510,102 +510,73 @@ def scrape_caesars_offers(driver):
             except:
                 continue
 
-    # Try aria-label elements — these are clickable divs, not <a> links
-    # First, collect ALL section info, then click one to discover the URL pattern
-    if not see_more_links:
-        print("  Trying aria-label search...")
-        all_elements = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"], [aria-label*="see more"]')
-        section_labels = []
-        for el in all_elements:
-            label = el.get_attribute('aria-label') or ''
-            if label:
-                name = label.replace('See more ', '').replace('see more ', '').strip()
-                section_labels.append(name)
-                print(f"  Found aria-label: {label}")
+    # The "See More" buttons are <div role="button"> elements with no href.
+    # They navigate via React click handlers.
+    # Strategy: click each one, scrape the resulting page, then go back.
 
-        # Click the first one to discover the URL pattern
-        if section_labels and all_elements:
-            try:
-                first_el = all_elements[0]
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", first_el)
-                human_delay(0.5, 1)
-                first_el.click()
-                human_delay(3, 5)
-                first_url = driver.current_url
-                print(f"  First section URL: {first_url}")
+    see_more_elements = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"]')
+    section_count = len(see_more_elements)
+    print(f"  Found {section_count} sections")
 
-                # Build URL pattern — e.g., ?group=current-week, ?group=following-month
-                # Known Caesars URL patterns:
-                url_base = 'https://www.caesars.com/rewards/offers?group='
-                group_map = {
-                    'EXPIRING IN THE NEXT 7 DAYS': 'current-week',
-                }
-                # For months, try "following-month", "following-next-month", etc.
-                month_groups = ['following-month', 'following-next-month', 'following-next-next-month',
-                               'following-next-next-next-month']
+    all_offers = []
 
-                month_idx = 0
-                for name in section_labels:
-                    if name in group_map:
-                        see_more_links.append({'href': url_base + group_map[name], 'name': name})
-                    else:
-                        if month_idx < len(month_groups):
-                            see_more_links.append({'href': url_base + month_groups[month_idx], 'name': name})
-                            month_idx += 1
-
-                # Go back to offers page for the navigation
-                driver.get('https://www.caesars.com/rewards/offers')
-                human_delay(3, 5)
-            except Exception as e:
-                print(f"  ⚠️ URL discovery failed: {e}")
-
-    print(f"  Found {len(see_more_links)} sections")
-
-    # Step 2: Scrape offers from the main page first
-    all_offers = scrape_offers_from_current_page(driver, 'MAIN PAGE')
-    print(f"  Main page: {len(all_offers)} offers")
-
-    # Step 3: Visit each section and scrape all pages
-    for section in see_more_links:
-        href = section.get('href', '')
-        name = section.get('name', 'UNKNOWN')
-
-        if not href:
-            continue
-
-        driver.get(href)
+    for idx in range(section_count):
+        # Re-find elements each time (page reloads lose references)
+        driver.get('https://www.caesars.com/rewards/offers')
         human_delay(3, 5)
 
-        print(f"  📂 Section: {name} (URL: {driver.current_url[:60]})")
+        # Scroll down to load all sections
+        for _ in range(5):
+            driver.execute_script("window.scrollBy(0, 600);")
+            human_delay(0.5, 1)
+        driver.execute_script("window.scrollTo(0, 0);")
+        human_delay(1, 2)
 
+        # Re-find and click the Nth "See More"
+        see_more = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"]')
+        if idx >= len(see_more):
+            break
+
+        label = see_more[idx].get_attribute('aria-label') or ''
+        name = label.replace('See more ', '').strip()
+        print(f"  📂 Clicking: {label}...")
+
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", see_more[idx])
+        human_delay(0.5, 1)
+        see_more[idx].click()
+        human_delay(3, 5)
+
+        print(f"    URL: {driver.current_url[:80]}")
+
+        # Scrape this section page
         page_offers = scrape_offers_from_current_page(driver, name)
         all_offers.extend(page_offers)
         print(f"    Page 1: {len(page_offers)} offers")
 
-        # Debug: if 0 offers, dump some page text
         if not page_offers:
-            text = driver.find_element(By.TAG_NAME, 'body').text[:600]
-            print(f"    DEBUG page text: {text[:300]}")
+            text = driver.find_element(By.TAG_NAME, 'body').text[:400]
+            print(f"    DEBUG: {text[:200]}")
 
-        # Handle pagination
+        # Handle pagination within the section
         page_num = 1
         while True:
             page_num += 1
             next_clicked = False
             try:
                 next_clicked = driver.execute_script("""
-                    var links = document.querySelectorAll('a, button');
-                    for (var i = 0; i < links.length; i++) {
-                        var text = links[i].textContent.trim();
-                        if (text === '""" + str(page_num) + """' && links[i].offsetWidth > 0) {
-                            links[i].click();
+                    var els = document.querySelectorAll('[role="button"], a, button');
+                    for (var i = 0; i < els.length; i++) {
+                        var text = els[i].textContent.trim();
+                        if (text === '""" + str(page_num) + """' && els[i].offsetWidth > 0) {
+                            els[i].click();
                             return true;
                         }
                     }
-                    for (var i = 0; i < links.length; i++) {
-                        var text = links[i].textContent.trim();
-                        if ((text === 'Next' || text === '>' || text === '›' || text === '»') && links[i].offsetWidth > 0) {
-                            links[i].click();
+                    for (var i = 0; i < els.length; i++) {
+                        var text = els[i].textContent.trim();
+                        var label = els[i].getAttribute('aria-label') || '';
+                        if ((text === '›' || text === '»' || label.toLowerCase().includes('next')) && els[i].offsetWidth > 0) {
+                            els[i].click();
                             return true;
                         }
                     }
