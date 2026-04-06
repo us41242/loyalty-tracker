@@ -511,16 +511,53 @@ def scrape_caesars_offers(driver):
                 continue
 
     # Try aria-label elements — these are clickable divs, not <a> links
+    # First, collect ALL section info, then click one to discover the URL pattern
     if not see_more_links:
         print("  Trying aria-label search...")
         all_elements = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"], [aria-label*="see more"]')
+        section_labels = []
         for el in all_elements:
             label = el.get_attribute('aria-label') or ''
             if label:
-                # Extract section name from aria-label (e.g., "See more APRIL OFFERS")
                 name = label.replace('See more ', '').replace('see more ', '').strip()
-                see_more_links.append({'href': '', 'name': name, 'xpath': '', 'element_label': label})
+                section_labels.append(name)
                 print(f"  Found aria-label: {label}")
+
+        # Click the first one to discover the URL pattern
+        if section_labels and all_elements:
+            try:
+                first_el = all_elements[0]
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", first_el)
+                human_delay(0.5, 1)
+                first_el.click()
+                human_delay(3, 5)
+                first_url = driver.current_url
+                print(f"  First section URL: {first_url}")
+
+                # Build URL pattern — e.g., ?group=current-week, ?group=following-month
+                # Known Caesars URL patterns:
+                url_base = 'https://www.caesars.com/rewards/offers?group='
+                group_map = {
+                    'EXPIRING IN THE NEXT 7 DAYS': 'current-week',
+                }
+                # For months, try "following-month", "following-next-month", etc.
+                month_groups = ['following-month', 'following-next-month', 'following-next-next-month',
+                               'following-next-next-next-month']
+
+                month_idx = 0
+                for name in section_labels:
+                    if name in group_map:
+                        see_more_links.append({'href': url_base + group_map[name], 'name': name})
+                    else:
+                        if month_idx < len(month_groups):
+                            see_more_links.append({'href': url_base + month_groups[month_idx], 'name': name})
+                            month_idx += 1
+
+                # Go back to offers page for the navigation
+                driver.get('https://www.caesars.com/rewards/offers')
+                human_delay(3, 5)
+            except Exception as e:
+                print(f"  ⚠️ URL discovery failed: {e}")
 
     print(f"  Found {len(see_more_links)} sections")
 
@@ -530,35 +567,25 @@ def scrape_caesars_offers(driver):
 
     # Step 3: Visit each section and scrape all pages
     for section in see_more_links:
-        href = section['href']
-        name = section['name']
+        href = section.get('href', '')
+        name = section.get('name', 'UNKNOWN')
 
         if not href:
-            # Click the element directly (aria-label or xpath)
-            try:
-                if section.get('element_label'):
-                    el = driver.find_element(By.CSS_SELECTOR, f'[aria-label="{section["element_label"]}"]')
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-                    human_delay(0.5, 1)
-                    el.click()
-                elif section.get('xpath'):
-                    el = driver.find_element(By.XPATH, section['xpath'])
-                    el.click()
-                else:
-                    continue
-                human_delay(3, 5)
-            except Exception as e:
-                print(f"  ⚠️ Could not click section {name}: {e}")
-                continue
-        else:
-            driver.get(href)
-            human_delay(3, 5)
+            continue
+
+        driver.get(href)
+        human_delay(3, 5)
 
         print(f"  📂 Section: {name} (URL: {driver.current_url[:60]})")
 
         page_offers = scrape_offers_from_current_page(driver, name)
         all_offers.extend(page_offers)
         print(f"    Page 1: {len(page_offers)} offers")
+
+        # Debug: if 0 offers, dump some page text
+        if not page_offers:
+            text = driver.find_element(By.TAG_NAME, 'body').text[:600]
+            print(f"    DEBUG page text: {text[:300]}")
 
         # Handle pagination
         page_num = 1
