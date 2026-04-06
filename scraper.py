@@ -952,10 +952,8 @@ def main():
     options = uc.ChromeOptions()
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--lang=en-US')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    if os.environ.get('CI'):
-        options.add_argument('--headless=new')
+    # DO NOT use --headless — Imperva detects it
+    # Use xvfb on Linux CI for a virtual display instead
 
     # Detect Chrome version automatically
     import subprocess, platform
