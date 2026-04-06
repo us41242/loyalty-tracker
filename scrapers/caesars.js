@@ -1,6 +1,23 @@
 const { supabase, parseDate } = require('./db');
 const { fetch2FACode } = require('./gmail');
 const { createPage, humanType, humanClick, humanNavigate, randomDelay, humanScroll } = require('./browser');
+const fs = require('fs');
+const path = require('path');
+
+// Debug: save screenshot and HTML for troubleshooting
+async function debugPage(page, label) {
+  try {
+    const dir = path.join(process.cwd(), 'debug');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    await page.screenshot({ path: path.join(dir, `${label}.png`), fullPage: true });
+    const html = await page.content();
+    fs.writeFileSync(path.join(dir, `${label}.html`), html);
+    console.log(`  📸 Debug saved: debug/${label}.png + .html`);
+  } catch (e) {
+    console.log(`  ⚠️ Could not save debug for ${label}: ${e.message}`);
+  }
+}
 
 async function scrapeCaesars(browser) {
   console.log('\n═══════════════════════════════════════');
@@ -27,6 +44,7 @@ async function scrapeCaesars(browser) {
     console.log('\n✅ Caesars scrape complete!\n');
   } catch (err) {
     console.error('❌ Caesars error:', err.message);
+    await debugPage(page, 'caesars-error');
   } finally {
     await page.close();
   }
@@ -37,71 +55,129 @@ async function login(page) {
   console.log('🔑 Logging in...');
   await humanNavigate(page, 'https://www.caesars.com/myrewards/profile/signin/');
 
-  // Wait for the form to render (React SPA)
-  await page.waitForSelector('input', { timeout: 20000 });
-  await randomDelay(2000, 4000);
+  // Wait for the React SPA to render
+  await randomDelay(3000, 5000);
 
-  // Find and fill username — try multiple selectors
-  const usernameSelectors = [
-    'input[type="text"]',
-    'input[type="email"]',
-    'input[name="email"]',
-    'input[name="username"]',
-    'input:not([type="password"]):not([type="hidden"])',
-  ];
+  // Debug: dump what inputs are on the page
+  const inputInfo = await page.evaluate(() => {
+    const inputs = [...document.querySelectorAll('input')];
+    return inputs.map(i => ({
+      type: i.type,
+      name: i.name,
+      id: i.id,
+      placeholder: i.placeholder,
+      className: i.className.substring(0, 50),
+      visible: i.offsetWidth > 0 && i.offsetHeight > 0,
+      ariaLabel: i.getAttribute('aria-label'),
+    }));
+  });
+  console.log('  Inputs found:', JSON.stringify(inputInfo, null, 2));
 
-  let filled = false;
-  for (const sel of usernameSelectors) {
-    try {
-      const el = await page.$(sel);
-      if (el) {
-        const isVisible = await page.evaluate(e => {
-          const rect = e.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        }, el);
-        if (isVisible) {
-          await humanType(page, sel, process.env.CAESARS_USERNAME);
-          filled = true;
-          break;
-        }
-      }
-    } catch (e) { continue; }
+  // Debug: dump all buttons
+  const buttonInfo = await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll('button')];
+    return buttons.map(b => ({
+      text: b.textContent.trim().substring(0, 40),
+      type: b.type,
+      className: b.className.substring(0, 50),
+      visible: b.offsetWidth > 0 && b.offsetHeight > 0,
+    }));
+  });
+  console.log('  Buttons found:', JSON.stringify(buttonInfo, null, 2));
+
+  await debugPage(page, 'caesars-login-page');
+
+  if (inputInfo.length === 0) {
+    console.log('  ⚠️ No inputs found — page may not have rendered');
+    // Try waiting longer
+    await randomDelay(5000, 8000);
+
+    const retryInputs = await page.evaluate(() => {
+      return [...document.querySelectorAll('input')].map(i => ({
+        type: i.type, name: i.name, placeholder: i.placeholder,
+        visible: i.offsetWidth > 0 && i.offsetHeight > 0,
+      }));
+    });
+    console.log('  Retry inputs:', JSON.stringify(retryInputs));
+
+    if (retryInputs.length === 0) {
+      // Check if there's a Cloudflare/bot challenge
+      const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+      console.log('  Page text:', bodyText);
+      throw new Error('Login page did not render — possible bot detection');
+    }
   }
 
-  if (!filled) throw new Error('Could not find username input');
+  // Find username input — try by aria-label, placeholder, type, etc.
+  let usernameSelector = null;
+  for (const input of inputInfo) {
+    if (!input.visible) continue;
+    if (input.type === 'password') continue;
+    if (input.type === 'hidden') continue;
 
-  await randomDelay(500, 1200);
-
-  // Fill password
-  await humanType(page, 'input[type="password"]', process.env.CAESARS_PASSWORD);
-  await randomDelay(800, 1800);
-
-  // Click sign in
-  const signInSelectors = [
-    'button[type="submit"]',
-    'button:nth-of-type(1)',
-  ];
-
-  for (const sel of signInSelectors) {
-    try {
-      const btn = await page.$(sel);
-      if (btn) {
-        const text = await page.evaluate(e => e.textContent, btn);
-        if (text && (text.includes('SIGN IN') || text.includes('Sign In') || text.includes('Log In'))) {
-          await humanClick(page, sel);
-          break;
-        }
-      }
-    } catch (e) { continue; }
+    // Build a selector for this input
+    if (input.id) usernameSelector = `#${input.id}`;
+    else if (input.name) usernameSelector = `input[name="${input.name}"]`;
+    else if (input.ariaLabel) usernameSelector = `input[aria-label="${input.ariaLabel}"]`;
+    else if (input.placeholder) usernameSelector = `input[placeholder="${input.placeholder}"]`;
+    else usernameSelector = `input[type="${input.type || 'text'}"]`;
+    break;
   }
 
-  // Fallback: click any submit button
-  try {
-    await humanClick(page, 'button[type="submit"]');
-  } catch (e) {}
+  if (!usernameSelector) throw new Error('Could not find username input');
+  console.log(`  Using username selector: ${usernameSelector}`);
 
-  await randomDelay(4000, 7000);
-  console.log('  URL after login:', page.url());
+  // Clear and type username
+  await page.click(usernameSelector, { clickCount: 3 }); // select all
+  await randomDelay(200, 400);
+  await page.keyboard.type(process.env.CAESARS_USERNAME, { delay: Math.floor(Math.random() * 100) + 60 });
+  await randomDelay(800, 1500);
+
+  // Find and fill password
+  const passSelector = 'input[type="password"]';
+  await page.click(passSelector, { clickCount: 3 });
+  await randomDelay(200, 400);
+  await page.keyboard.type(process.env.CAESARS_PASSWORD, { delay: Math.floor(Math.random() * 100) + 60 });
+  await randomDelay(1000, 2000);
+
+  // Find sign in button
+  const signInClicked = await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll('button')];
+    const signIn = buttons.find(b =>
+      b.textContent.trim().match(/^(SIGN IN|Sign In|Log In|LOGIN)$/i) &&
+      b.offsetWidth > 0
+    );
+    if (signIn) {
+      signIn.click();
+      return true;
+    }
+    return false;
+  });
+
+  if (!signInClicked) {
+    console.log('  ⚠️ Could not find sign-in button, trying submit');
+    await page.keyboard.press('Enter');
+  }
+
+  console.log('  Waiting for login response...');
+  await randomDelay(5000, 8000);
+
+  // Check if we navigated away from signin
+  const currentUrl = page.url();
+  console.log('  URL after login:', currentUrl);
+
+  if (currentUrl.includes('/signin')) {
+    await debugPage(page, 'caesars-login-failed');
+
+    // Check for error messages
+    const errorText = await page.evaluate(() => {
+      const errors = document.querySelectorAll('[class*="error"], [class*="alert"], [role="alert"]');
+      return [...errors].map(e => e.textContent.trim()).join(' | ');
+    });
+    if (errorText) console.log('  Error messages:', errorText);
+
+    console.log('  ⚠️ Login may have failed — continuing anyway');
+  }
 }
 
 // ── 2FA ─────────────────────────────────────────────────────────────────────
@@ -110,7 +186,7 @@ async function handle2FA(page) {
 
   console.log('🔐 2FA required...');
   await page.waitForSelector('input[maxlength="1"]', { timeout: 10000 });
-  await randomDelay(8000, 12000); // Wait for email to arrive
+  await randomDelay(8000, 12000);
 
   const code = await fetch2FACode();
   if (!code) throw new Error('Could not get 2FA code');
@@ -126,12 +202,9 @@ async function handle2FA(page) {
   }
 
   await randomDelay(2000, 4000);
-
-  // Wait for redirect
   try {
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 });
   } catch (e) {}
-
   await randomDelay(2000, 3000);
   console.log('  ✅ 2FA complete');
 }
@@ -162,6 +235,10 @@ async function scrapeRewardsHome(page) {
     };
   });
 
+  if (!data.rewardCredits) {
+    await debugPage(page, 'caesars-rewards-home');
+  }
+
   console.log('  Credits:', data.rewardCredits, '| Tier:', data.tierCredits, data.tierStatus);
   return data;
 }
@@ -171,7 +248,6 @@ async function scrapeReservations(page, tab) {
   console.log(`📋 Scraping ${tab} reservations...`);
   await humanNavigate(page, 'https://www.caesars.com/rewards/stays');
 
-  // Click tab
   try {
     const tabText = tab.toUpperCase();
     await page.evaluate((t) => {
@@ -217,38 +293,28 @@ async function scrapeOffers(page) {
 
   // Clear filters
   try {
-    const clearBtn = await page.$('button, a');
-    const buttons = await page.$$('button, a');
-    for (const btn of buttons) {
-      const text = await page.evaluate(e => e.textContent.trim(), btn);
-      if (text === 'Clear Filters') {
-        await btn.click();
-        await randomDelay(2000, 3000);
-        break;
-      }
-    }
+    const cleared = await page.evaluate(() => {
+      const els = [...document.querySelectorAll('button, a')];
+      const btn = els.find(e => e.textContent.trim() === 'Clear Filters');
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    if (cleared) await randomDelay(2000, 3000);
   } catch (e) {}
 
-  // Click "See More" buttons to expand sections
+  // Click "See More" buttons
   for (let i = 0; i < 10; i++) {
-    try {
-      const buttons = await page.$$('button, a');
-      let found = false;
-      for (const btn of buttons) {
-        const text = await page.evaluate(e => e.textContent.trim(), btn);
-        if (text.includes('See More')) {
-          await btn.click();
-          await randomDelay(1500, 3000);
-          await humanScroll(page, 300);
-          found = true;
-          break;
-        }
-      }
-      if (!found) break;
-    } catch (e) { break; }
+    const clicked = await page.evaluate(() => {
+      const els = [...document.querySelectorAll('button, a')];
+      const btn = els.find(e => e.textContent.trim().includes('See More'));
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    if (!clicked) break;
+    await randomDelay(1500, 3000);
+    await humanScroll(page, 300);
   }
 
-  // Extract offer data from page
   const offers = await page.evaluate(() => {
     const results = [];
     const text = document.body.innerText;
@@ -298,33 +364,27 @@ async function scrapeOffers(page) {
 async function scrapeGreatGift(page) {
   console.log('🎄 Scraping Great Gift...');
   try {
-    // Navigate to promotions and find Great Gift link
     await humanNavigate(page, 'https://www.caesars.com/rewards/offers');
     await randomDelay(2000, 3000);
 
-    // Look for Great Gift / Gift Wrap link
-    const links = await page.$$('a');
-    for (const link of links) {
-      const text = await page.evaluate(e => e.textContent, link);
-      if (text && (text.includes('Great Gift') || text.includes('Gift Wrap'))) {
-        await link.click();
-        await randomDelay(3000, 5000);
+    const clicked = await page.evaluate(() => {
+      const links = [...document.querySelectorAll('a')];
+      const giftLink = links.find(l => l.textContent.includes('Great Gift') || l.textContent.includes('Gift Wrap'));
+      if (giftLink) { giftLink.click(); return true; }
+      return false;
+    });
 
-        // Look for Shop Now
-        const shopLinks = await page.$$('a');
-        for (const sl of shopLinks) {
-          const st = await page.evaluate(e => e.textContent, sl);
-          if (st && st.includes('Shop Now')) {
-            await sl.click();
-            await randomDelay(5000, 8000);
-            break;
-          }
-        }
-        break;
-      }
+    if (clicked) {
+      await randomDelay(3000, 5000);
+      const shopClicked = await page.evaluate(() => {
+        const links = [...document.querySelectorAll('a')];
+        const shop = links.find(l => l.textContent.includes('Shop Now'));
+        if (shop) { shop.click(); return true; }
+        return false;
+      });
+      if (shopClicked) await randomDelay(5000, 8000);
     }
 
-    // Handle 2FA if triggered
     if (page.url().includes('/verification/step-up')) {
       await handle2FA(page);
     }
@@ -385,7 +445,6 @@ async function saveOffers(offers) {
   for (const o of offers) {
     const offerId = o.offerId || `${o.title}-${o.dates}`.replace(/\s+/g, '-').substring(0, 50);
     if (!offerId || !o.title) continue;
-
     const { error } = await supabase.from('caesars_offers').upsert({
       offer_id: offerId,
       title: o.title,
