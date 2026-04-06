@@ -26,6 +26,61 @@ from supabase import create_client
 # ── Config ───────────────────────────────────────────────────────────────────
 supabase = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 
+# ── Cookie Session Management ────────────────────────────────────────────────
+def save_cookies(driver, site):
+    """Save browser cookies to Supabase for reuse across runs."""
+    try:
+        cookies = driver.get_cookies()
+        supabase.table('session_cookies').upsert({
+            'site': site,
+            'cookies': json.dumps(cookies),
+            'updated_at': datetime.now().isoformat(),
+        }, on_conflict='site').execute()
+        print(f"  🍪 Saved {len(cookies)} cookies for {site}")
+    except Exception as e:
+        print(f"  ⚠️ Could not save cookies for {site}: {e}")
+
+def load_cookies(driver, site, domain):
+    """Load cookies from Supabase and inject into browser. Returns True if cookies loaded."""
+    try:
+        result = supabase.table('session_cookies').select('cookies, updated_at').eq('site', site).execute()
+        if not result.data or len(result.data) == 0:
+            print(f"  🍪 No saved cookies for {site}")
+            return False
+
+        row = result.data[0]
+        cookies = json.loads(row['cookies'])
+        updated = row['updated_at']
+        print(f"  🍪 Loading {len(cookies)} cookies for {site} (saved: {updated[:19]})")
+
+        # Navigate to the domain first so cookies can be set
+        driver.get(f'https://{domain}/')
+        human_delay(2, 3)
+
+        for cookie in cookies:
+            # Remove problematic fields
+            for key in ['sameSite', 'expiry', 'httpOnly', 'storeId']:
+                cookie.pop(key, None)
+            # Ensure domain matches
+            if 'domain' in cookie and domain not in cookie['domain']:
+                continue
+            try:
+                driver.add_cookie(cookie)
+            except:
+                pass
+
+        return True
+    except Exception as e:
+        print(f"  🍪 Could not load cookies for {site}: {e}")
+        return False
+
+def verify_session(driver, check_url, success_indicator):
+    """Navigate to a page and check if we're logged in."""
+    driver.get(check_url)
+    human_delay(3, 5)
+    text = driver.find_element(By.TAG_NAME, 'body').text
+    return success_indicator.lower() in text.lower()
+
 # ── Human-like helpers ───────────────────────────────────────────────────────
 def human_delay(min_s=1.0, max_s=3.0):
     time.sleep(random.uniform(min_s, max_s))
@@ -201,6 +256,15 @@ def scrape_caesars(driver):
 
 def caesars_login(driver):
     print("🔑 Logging in to Caesars...")
+
+    # Try loading saved cookies first
+    if load_cookies(driver, 'caesars', 'www.caesars.com'):
+        if verify_session(driver, 'https://www.caesars.com/rewards/home', 'REWARD CREDITS'):
+            print("  ✅ Session restored from cookies!")
+            return
+        else:
+            print("  🍪 Cookies expired, doing full login...")
+
     driver.get('https://www.caesars.com/myrewards/profile/signin/')
     human_delay(3, 5)
 
@@ -242,6 +306,9 @@ def caesars_login(driver):
     # Handle 2FA if needed
     if '/verification/step-up' in driver.current_url:
         handle_caesars_2fa(driver)
+
+    # Save cookies after successful login
+    save_cookies(driver, 'caesars')
 
 def handle_caesars_2fa(driver):
     print("🔐 2FA required...")
@@ -554,6 +621,15 @@ def scrape_rio(driver):
 
 def rio_login(driver):
     print("🔑 Logging in to Rio...")
+
+    # Try loading saved cookies first
+    if load_cookies(driver, 'rio', 'www.riolasvegas.com'):
+        if verify_session(driver, 'https://www.riolasvegas.com/rio-rewards/offers', 'RIO REWARDS POINTS'):
+            print("  ✅ Session restored from cookies!")
+            return
+        else:
+            print("  🍪 Cookies expired, doing full login...")
+
     driver.get('https://www.riolasvegas.com/api/auth/login?returnTo=/rio-rewards/offers')
     human_delay(3, 5)
 
@@ -575,6 +651,7 @@ def rio_login(driver):
         print(f"  Login flow: {e}")
 
     print(f"  URL after login: {driver.current_url}")
+    save_cookies(driver, 'rio')
 
 def scrape_rio_rewards(driver):
     if '/rio-rewards/offers' not in driver.current_url:
@@ -645,6 +722,15 @@ def scrape_mgm(driver):
 
 def mgm_login(driver):
     print("🔑 Logging in to MGM...")
+
+    # Try loading saved cookies first
+    if load_cookies(driver, 'mgm', 'www.mgmresorts.com'):
+        if verify_session(driver, 'https://www.mgmresorts.com/rewards/', 'Tier Credits'):
+            print("  ✅ Session restored from cookies!")
+            return
+        else:
+            print("  🍪 Cookies expired, doing full login...")
+
     # Visit main site first to build cookies
     driver.get('https://www.mgmresorts.com/')
     human_delay(3, 5)
@@ -679,6 +765,7 @@ def mgm_login(driver):
         print(f"  Login flow: {e}")
 
     print(f"  URL after login: {driver.current_url}")
+    save_cookies(driver, 'mgm')
 
 def scrape_mgm_rewards(driver):
     print("📊 Scraping MGM rewards...")
@@ -870,22 +957,26 @@ def main():
     if os.environ.get('CI'):
         options.add_argument('--headless=new')
 
-    # Detect Chrome version automatically; fall back to manual if needed
+    # Detect Chrome version automatically
+    import subprocess, platform
+    chrome_ver = None
     try:
-        import subprocess
-        result = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
-        if result.returncode != 0:
-            result = subprocess.run(['chromium', '--version'], capture_output=True, text=True)
+        if platform.system() == 'Darwin':
+            result = subprocess.run(
+                ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '--version'],
+                capture_output=True, text=True)
+        else:
+            result = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
+            if result.returncode != 0:
+                result = subprocess.run(['chromium', '--version'], capture_output=True, text=True)
         ver_match = re.search(r'(\d+)\.', result.stdout)
         chrome_ver = int(ver_match.group(1)) if ver_match else None
     except:
-        chrome_ver = None
+        pass
 
-    if chrome_ver:
-        print(f"  Detected Chrome version: {chrome_ver}")
-        driver = uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
-    else:
-        driver = uc.Chrome(options=options, use_subprocess=True)
+    print(f"  Chrome version: {chrome_ver or 'auto-detect'}")
+    driver = uc.Chrome(options=options, use_subprocess=True,
+                       version_main=chrome_ver) if chrome_ver else uc.Chrome(options=options, use_subprocess=True)
 
     try:
         scrape_caesars(driver)
