@@ -563,51 +563,77 @@ def scrape_caesars_offers(driver):
         first_card[0].click()
         human_delay(1.5, 2.5)
 
-        # Now cycle through ALL offers using "View details of NEXT offer" button
+        # Cycle through ALL offers using "View details of NEXT offer" button
+        # The overlay panel structure (from Close button walking up):
+        #   [1] Title (e.g., "KIOSK GAME IN VEGAS")
+        #   [2] Dates (e.g., "Expires today" or "Valid 04.07.26 - 04.07.26")
+        #   [3] Offer ID (e.g., "Offer 1NC56HC10X04")
+        #   [5] Description
+        #   [6+] AVAILABLE HOTELS & RESORTS, properties list
         offer_count = 0
-        seen_titles = set()
-        max_offers = 100  # safety limit per section
+        seen_offer_ids = set()
+        max_offers = 100
 
         while offer_count < max_offers:
-            # Extract current offer details from the detail panel
             offer = driver.execute_script("""
-                var body = document.body.innerText;
-                var lines = body.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
+                // Find overlay by walking up from Close button
+                var closeBtn = null;
+                var allEls = document.querySelectorAll('[role="button"]');
+                for (var i = 0; i < allEls.length; i++) {
+                    if (allEls[i].innerText.trim() === 'Close') {
+                        closeBtn = allEls[i]; break;
+                    }
+                }
+                if (!closeBtn) return null;
 
-                // The detail panel shows: title, expiry, offer ID, description, properties
+                var overlay = closeBtn;
+                for (var j = 0; j < 15; j++) {
+                    overlay = overlay.parentElement;
+                    if (overlay && overlay.offsetHeight > 800) break;
+                }
+
+                var text = overlay.innerText;
+                var lines = text.split('\\n').map(function(l){return l.trim()}).filter(function(l){return l});
+
                 var title = '';
-                var offerId = '';
                 var dates = '';
+                var offerId = '';
                 var description = '';
-                var properties = '';
+                var properties = [];
 
-                for (var i = 0; i < lines.length; i++) {
-                    if (lines[i].match(/^Offer\\s+[A-Z0-9]{6,}/i)) {
-                        offerId = lines[i].replace(/^Offer\\s+/i, '').trim();
+                var inProperties = false;
+                for (var k = 0; k < lines.length; k++) {
+                    if (lines[k].match(/^Offer\\s+[A-Z0-9]/)) {
+                        offerId = lines[k].replace(/^Offer\\s+/, '').trim();
                     }
-                    if (lines[i].match(/^Expires?\\s/i) || lines[i].match(/^Valid\\s/i)) {
-                        dates = lines[i];
+                    if (lines[k].match(/^(Expires?|Valid)\\s/i)) {
+                        dates = lines[k];
                     }
-                    if (lines[i].match(/AVAILABLE.*RESORTS/i)) {
-                        properties = lines[i+1] || '';
+                    if (lines[k] === 'AVAILABLE HOTELS & RESORTS') {
+                        inProperties = true; continue;
+                    }
+                    if (lines[k] === 'HOW TO REDEEM:') {
+                        inProperties = false; continue;
+                    }
+                    if (inProperties && lines[k].length > 2) {
+                        properties.push(lines[k]);
                     }
                 }
 
-                // Title is typically the first large text in the detail panel
-                // Look for elements with aria-label that might contain the offer title
-                var detailPanel = document.querySelector('[class*="r-1p0dtai"]') ||
-                                  document.querySelector('[class*="panel"]') ||
-                                  document.body;
-                var allText = detailPanel.innerText;
-                var allLines = allText.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l && l.length > 3; });
+                // Title is the first non-empty line that isn't a nav item
+                for (var m = 0; m < Math.min(lines.length, 5); m++) {
+                    if (lines[m].length > 2 &&
+                        !lines[m].match(/^(Close|EXPIRING|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)/i) &&
+                        lines[m] !== dates && !lines[m].match(/^Offer\\s/) &&
+                        lines[m] !== 'ADD TO MY CALENDAR') {
+                        title = lines[m]; break;
+                    }
+                }
 
-                // First meaningful line is usually the title
-                for (var j = 0; j < Math.min(allLines.length, 5); j++) {
-                    if (!allLines[j].match(/^(HOME|STAYS|OFFERS|BENEFITS|SUPPORT|ACCOUNT|BOOK|DEALS|DESTINATIONS)/i) &&
-                        !allLines[j].match(/^(FILTER|DESTINATIONS|DATES|OFFER TYPE|Clear)/i) &&
-                        allLines[j].length > 3 && allLines[j].length < 100) {
-                        title = allLines[j];
-                        break;
+                // Description: line after "ADD TO MY CALENDAR" or after offer ID
+                for (var n = 0; n < lines.length; n++) {
+                    if (lines[n] === 'ADD TO MY CALENDAR' && n+1 < lines.length) {
+                        description = lines[n+1]; break;
                     }
                 }
 
@@ -615,33 +641,41 @@ def scrape_caesars_offers(driver):
                     title: title,
                     offerId: offerId,
                     dates: dates,
-                    properties: properties,
-                    description: allText.substring(0, 300)
+                    description: description,
+                    properties: properties.join(', ')
                 };
             """)
 
-            title = offer.get('title', '')
-
-            # Stop if we've seen this title before (looped back to start)
-            if title in seen_titles:
-                break
-            if title:
-                seen_titles.add(title)
-                offer['section'] = name
-                offer['offer_id'] = offer.get('offerId') or f"{title}-{offer.get('dates','')}".replace(' ', '-')[:50]
-                all_offers.append(offer)
-                offer_count += 1
-
-            # Click "View details of NEXT offer" to advance
-            next_btn = driver.find_elements(By.CSS_SELECTOR, '[aria-label="View details of NEXT offer."]')
-            if not next_btn:
-                # Try partial match
-                next_btn = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="NEXT offer"]')
-            if not next_btn:
+            if not offer or not offer.get('offerId'):
                 break
 
+            oid = offer['offerId']
+            if oid in seen_offer_ids:
+                break  # Looped back to start
+
+            seen_offer_ids.add(oid)
+            offer['section'] = name
+            offer['offer_id'] = oid
+            all_offers.append(offer)
+            offer_count += 1
+
+            # Click NEXT
+            next_btn = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="NEXT offer"]')
+            if not next_btn:
+                break
             next_btn[0].click()
-            human_delay(0.8, 1.5)
+            human_delay(0.6, 1.2)
+
+        # Close the detail panel
+        try:
+            close_btns = driver.find_elements(By.CSS_SELECTOR, '[role="button"]')
+            for cb in close_btns:
+                if cb.text.strip() == 'Close':
+                    cb.click()
+                    break
+        except:
+            pass
+        human_delay(1, 2)
 
         print(f"    {offer_count} offers scraped")
 
@@ -657,48 +691,6 @@ def scrape_caesars_offers(driver):
     print(f"  Found {len(unique_offers)} total unique offers")
     return unique_offers
 
-def scrape_offers_from_current_page(driver, section_name):
-    """Extract offers from offer cards (aria-label='Open Offer Details')."""
-    offers = driver.execute_script("""
-        var cards = document.querySelectorAll('[aria-label="Open Offer Details"]');
-        var results = [];
-        for (var i = 0; i < cards.length; i++) {
-            var card = cards[i];
-            var text = card.innerText;
-            var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
-
-            var title = lines[0] || '';
-            var property = '';
-            var dates = '';
-
-            for (var j = 0; j < lines.length; j++) {
-                if (lines[j].match(/^(Expires|Valid)/i)) {
-                    dates = lines[j];
-                }
-                if (lines[j].match(/(Las Vegas|Resorts|Lake Tahoe|Palace|New Orleans|Atlantic|Republic|Harrah|Horseshoe|Flamingo|Bally|Planet Hollywood|Caesars)/i)) {
-                    property = lines[j];
-                }
-            }
-
-            // Skip if no title
-            if (title) {
-                results.push({
-                    title: title,
-                    property: property,
-                    dates: dates,
-                    text: text.substring(0, 200)
-                });
-            }
-        }
-        return results;
-    """)
-
-    # Add section and generate offer_id
-    for o in offers:
-        o['section'] = section_name
-        o['offer_id'] = f"{o['title']}-{o.get('dates','')}".replace(' ', '-')[:50]
-
-    return offers
 
 def scrape_caesars_great_gift(driver):
     print("🎄 Scraping Great Gift...")
