@@ -1,6 +1,6 @@
 const { supabase, parseDate } = require('./db');
 const { fetch2FACode } = require('./gmail');
-const { createPage, humanType, humanClick, humanNavigate, randomDelay, humanScroll } = require('./browser');
+const { createPage, humanType, reactType, humanClick, humanNavigate, randomDelay, humanScroll } = require('./browser');
 const fs = require('fs');
 const path = require('path');
 
@@ -127,17 +127,15 @@ async function login(page) {
   if (!usernameSelector) throw new Error('Could not find username input');
   console.log(`  Using username selector: ${usernameSelector}`);
 
-  // Clear and type username
-  await page.click(usernameSelector, { clickCount: 3 }); // select all
-  await randomDelay(200, 400);
-  await page.keyboard.type(process.env.CAESARS_USERNAME, { delay: Math.floor(Math.random() * 100) + 60 });
+  // Use React-compatible typing for Caesars (React SPA)
+  await reactType(page, usernameSelector, process.env.CAESARS_USERNAME);
+  console.log('  Username entered');
   await randomDelay(800, 1500);
 
-  // Find and fill password
+  // Password — also React controlled
   const passSelector = 'input[type="password"]';
-  await page.click(passSelector, { clickCount: 3 });
-  await randomDelay(200, 400);
-  await page.keyboard.type(process.env.CAESARS_PASSWORD, { delay: Math.floor(Math.random() * 100) + 60 });
+  await reactType(page, passSelector, process.env.CAESARS_PASSWORD);
+  console.log('  Password entered');
   await randomDelay(1000, 2000);
 
   // Find sign in button

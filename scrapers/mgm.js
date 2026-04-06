@@ -1,5 +1,5 @@
 const { supabase, parseDate } = require('./db');
-const { createPage, humanType, humanClick, humanNavigate, randomDelay } = require('./browser');
+const { createPage, humanType, reactType, humanClick, humanNavigate, randomDelay, humanScroll } = require('./browser');
 const fs = require('fs');
 const path = require('path');
 
@@ -37,85 +37,92 @@ async function scrapeMGM(browser) {
 
 async function login(page) {
   console.log('🔑 Logging in to MGM...');
+
+  // Navigate to main site first (build cookies), then go to login
+  await humanNavigate(page, 'https://www.mgmresorts.com/');
+  await randomDelay(2000, 4000);
+  await humanScroll(page, 300);
+  await randomDelay(1000, 2000);
+
+  // Now navigate to login
   await humanNavigate(page, 'https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=');
-  await randomDelay(3000, 5000);
-
-  // Debug: what's on the page?
-  const inputInfo = await page.evaluate(() => {
-    const inputs = [...document.querySelectorAll('input')];
-    return inputs.map(i => ({
-      type: i.type, name: i.name, id: i.id, placeholder: i.placeholder,
-      visible: i.offsetWidth > 0 && i.offsetHeight > 0,
-      ariaLabel: i.getAttribute('aria-label'),
-    }));
-  });
-  console.log('  Inputs found:', JSON.stringify(inputInfo));
-
-  const buttonInfo = await page.evaluate(() => {
-    const buttons = [...document.querySelectorAll('button, input[type="submit"]')];
-    return buttons.map(b => ({
-      text: b.textContent.trim().substring(0, 40), type: b.type,
-      visible: b.offsetWidth > 0 && b.offsetHeight > 0,
-    }));
-  });
-  console.log('  Buttons found:', JSON.stringify(buttonInfo));
-
-  // Check for bot challenge
-  const pageText = await page.evaluate(() => document.body.innerText.substring(0, 300));
-  console.log('  Page text preview:', pageText.replace(/\n/g, ' ').substring(0, 200));
+  await randomDelay(3000, 6000);
 
   await debugPage(page, 'mgm-login-page');
 
+  // Debug
+  const pageText = await page.evaluate(() => document.body.innerText.substring(0, 300));
+  console.log('  Page text:', pageText.replace(/\n/g, ' ').substring(0, 200));
+
+  // Check for error on page load
+  if (pageText.includes('error') || pageText.includes('Oops')) {
+    console.log('  ⚠️ MGM showing error on load — may be detecting bot');
+    // Try refreshing with more delay
+    await randomDelay(3000, 5000);
+    await page.reload({ waitUntil: 'networkidle2' });
+    await randomDelay(3000, 5000);
+  }
+
   try {
-    // Find any visible input that could be email
-    const emailSelector = inputInfo.find(i => i.visible && i.type !== 'password' && i.type !== 'hidden');
-    if (emailSelector) {
-      const sel = emailSelector.id ? `#${emailSelector.id}` :
-                  emailSelector.name ? `input[name="${emailSelector.name}"]` :
-                  `input[type="${emailSelector.type}"]`;
-      console.log(`  Using email selector: ${sel}`);
+    // Step 1: Enter email
+    const emailInput = await page.$('#email');
+    if (emailInput) {
+      console.log('  Found email input');
+      // Click, wait, then type slowly
+      await page.click('#email');
+      await randomDelay(500, 1000);
 
-      await page.click(sel, { clickCount: 3 });
-      await randomDelay(200, 400);
-      await page.keyboard.type(process.env.MGM_EMAIL, { delay: Math.floor(Math.random() * 100) + 60 });
-      await randomDelay(800, 1500);
+      // Type email character by character with human delays
+      for (const char of process.env.MGM_EMAIL) {
+        await page.keyboard.type(char, { delay: Math.floor(Math.random() * 120) + 80 });
+      }
+      await randomDelay(1000, 2000);
 
-      // Look for Next/Continue/Sign In button
-      const signInClicked = await page.evaluate(() => {
-        const buttons = [...document.querySelectorAll('button')];
-        const btn = buttons.find(b =>
-          b.offsetWidth > 0 &&
-          (b.textContent.trim().match(/^(Next|Continue|Sign In|Log In|Submit)$/i))
-        );
-        if (btn) { btn.click(); return btn.textContent.trim(); }
-        return null;
-      });
-      console.log(`  Clicked: ${signInClicked || 'none'}`);
-      await randomDelay(2000, 4000);
+      // Click Next button with mouse movement
+      const nextBtn = await page.$('button[type="submit"]');
+      if (nextBtn) {
+        const box = await nextBtn.boundingBox();
+        if (box) {
+          await page.mouse.move(box.x + box.width/2, box.y + box.height/2, { steps: 15 });
+          await randomDelay(200, 500);
+          await page.mouse.click(box.x + box.width/2, box.y + box.height/2);
+        }
+      }
+      console.log('  Clicked Next');
+      await randomDelay(3000, 5000);
 
-      // Check for password field appearing
+      await debugPage(page, 'mgm-after-next');
+
+      // Step 2: Enter password (if password field appears)
       const passInput = await page.$('input[type="password"]');
       if (passInput) {
-        await page.click('input[type="password"]', { clickCount: 3 });
-        await randomDelay(200, 400);
-        await page.keyboard.type(process.env.MGM_PASSWORD, { delay: Math.floor(Math.random() * 100) + 60 });
-        await randomDelay(800, 1500);
+        console.log('  Found password input');
+        await page.click('input[type="password"]');
+        await randomDelay(500, 1000);
 
-        const submitted = await page.evaluate(() => {
-          const buttons = [...document.querySelectorAll('button')];
-          const btn = buttons.find(b =>
-            b.offsetWidth > 0 &&
-            b.textContent.trim().match(/^(Sign In|Log In|Submit)$/i)
-          );
-          if (btn) { btn.click(); return true; }
-          return false;
-        });
-        if (!submitted) await page.keyboard.press('Enter');
+        for (const char of process.env.MGM_PASSWORD) {
+          await page.keyboard.type(char, { delay: Math.floor(Math.random() * 120) + 80 });
+        }
+        await randomDelay(1000, 2000);
 
+        // Click Sign In
+        const signInBtn = await page.$('button[type="submit"]');
+        if (signInBtn) {
+          const box = await signInBtn.boundingBox();
+          if (box) {
+            await page.mouse.move(box.x + box.width/2, box.y + box.height/2, { steps: 15 });
+            await randomDelay(200, 500);
+            await page.mouse.click(box.x + box.width/2, box.y + box.height/2);
+          }
+        }
+        console.log('  Clicked Sign In');
         await randomDelay(5000, 8000);
+      } else {
+        console.log('  ⚠️ No password field found after Next');
+        await debugPage(page, 'mgm-no-password');
       }
     } else {
-      console.log('  ⚠️ No visible email input found');
+      console.log('  ⚠️ No email input found');
     }
   } catch (e) {
     console.log('  Login flow issue:', e.message);
