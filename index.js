@@ -16,7 +16,7 @@ async function main() {
 
   try {
     // Run scrapers sequentially (each manages its own browser context)
-    await scrapeCaesars(browser, process.env.GMAIL_ACCESS_TOKEN || null);
+    await scrapeCaesars(browser);
     await scrapeRio(browser);
     await scrapeMGM(browser);
   } catch (err) {

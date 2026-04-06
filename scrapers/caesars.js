@@ -1,7 +1,7 @@
 const { supabase, parseDate } = require('./db');
 const { fetch2FACode } = require('./gmail');
 
-async function scrapeCaesars(browser, gmailToken) {
+async function scrapeCaesars(browser) {
   console.log('\n═══════════════════════════════════════');
   console.log('  CAESARS REWARDS SCRAPER');
   console.log('═══════════════════════════════════════\n');
@@ -16,7 +16,7 @@ async function scrapeCaesars(browser, gmailToken) {
     await login(page);
 
     // 2. Check for 2FA right after login
-    await handle2FA(page, gmailToken);
+    await handle2FA(page);
 
     // 3. Scrape rewards home
     const rewards = await scrapeRewardsHome(page);
@@ -80,7 +80,7 @@ async function login(page) {
 }
 
 // ── 2FA ─────────────────────────────────────────────────────────────────────
-async function handle2FA(page, gmailToken) {
+async function handle2FA(page) {
   if (!page.url().includes('/verification/step-up')) return;
 
   console.log('🔐 2FA required...');
@@ -89,7 +89,7 @@ async function handle2FA(page, gmailToken) {
   // Wait a bit for the email to arrive
   await page.waitForTimeout(10000);
 
-  const code = await fetch2FACode(gmailToken);
+  const code = await fetch2FACode();
   if (!code) throw new Error('Could not get 2FA code');
 
   console.log(`  Entering code: ${code}`);
@@ -295,7 +295,7 @@ async function scrapeOffers(page) {
 }
 
 // ── Great Gift ──────────────────────────────────────────────────────────────
-async function scrapeGreatGift(page, gmailToken) {
+async function scrapeGreatGift(page) {
   console.log('🎄 Scraping Great Gift...');
 
   // Navigate through: caesars.com promotions > Great Gift Wrap Up > Shop Now
@@ -321,7 +321,7 @@ async function scrapeGreatGift(page, gmailToken) {
     }
 
     // Handle 2FA if triggered
-    await handle2FA(page, gmailToken);
+    await handle2FA(page);
 
     // Extract points from the Great Gift page
     await page.waitForTimeout(3000);
