@@ -17,24 +17,24 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install undetected-chromedriver selenium python-dotenv supabase
+        run: pip install undetected-chromedriver selenium python-dotenv
 
-      - name: Install Chrome
+      - name: Install Chrome + xvfb
         run: |
           wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb xvfb
           google-chrome --version
 
       - name: Create debug dir
         run: mkdir -p debug
 
-      - name: Test Caesars login
+      - name: Test Caesars login (with virtual display)
         env:
           CAESARS_USERNAME: ${{ secrets.CAESARS_USERNAME }}
           CAESARS_PASSWORD: ${{ secrets.CAESARS_PASSWORD }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python test_caesars_login.py
+        run: xvfb-run --auto-servernum python test_caesars_login.py
 
       - name: Upload screenshots
         if: always()
