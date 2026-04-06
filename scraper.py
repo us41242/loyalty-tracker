@@ -606,47 +606,45 @@ def scrape_caesars_offers(driver):
     return unique_offers
 
 def scrape_offers_from_current_page(driver, section_name):
-    """Extract offers from whatever page is currently loaded."""
-    text = driver.find_element(By.TAG_NAME, 'body').text
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    offers = []
+    """Extract offers using data-testid='offer-details' elements."""
+    offers = driver.execute_script("""
+        var cards = document.querySelectorAll('[data-testid="offer-details"]');
+        var results = [];
+        for (var i = 0; i < cards.length; i++) {
+            var card = cards[i];
+            var text = card.innerText;
+            var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
 
-    for i, line in enumerate(lines):
-        # Match date patterns: "Expires today", "Expires Tomorrow", "Valid MM.DD.YY - MM.DD.YY"
-        is_date = (re.match(r'^Expires?\s+(today|tomorrow|\d)', line, re.I) or
-                   re.match(r'^Valid\s+\d', line, re.I))
+            var title = lines[0] || '';
+            var property = '';
+            var dates = '';
 
-        if is_date:
-            # Title is usually 1-3 lines above, skip property/location lines
-            title = ''
-            property_name = ''
-            for j in range(i-1, max(0, i-5), -1):
-                if re.match(r'^(EXPIRING|JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)', lines[j], re.I):
-                    break
-                if re.match(r'^(See More|Clear Filters|FILTER|DESTINATIONS|DATES|OFFER TYPE|Page \d|›|‹|\d+$)', lines[j], re.I):
-                    break
-                # Property/location lines are usually short and contain "Las Vegas", "Resorts", etc.
-                if not title:
-                    # Check if this looks like a property name
-                    if any(kw in lines[j] for kw in ['Las Vegas', 'Resorts', 'Lake Tahoe', 'Palace', 'New Orleans', 'Atlantic']):
-                        property_name = lines[j]
-                    else:
-                        title = lines[j]
-                elif not property_name:
-                    if any(kw in lines[j] for kw in ['Las Vegas', 'Resorts', 'Lake Tahoe', 'Palace', 'New Orleans', 'Atlantic']):
-                        property_name = lines[j]
-                    else:
-                        title = lines[j]  # The real title was further up
-                break
+            for (var j = 0; j < lines.length; j++) {
+                if (lines[j].match(/^(Expires|Valid)/i)) {
+                    dates = lines[j];
+                }
+                if (lines[j].match(/(Las Vegas|Resorts|Lake Tahoe|Palace|New Orleans|Atlantic|Republic|Harrah|Horseshoe|Flamingo|Bally|Planet Hollywood|Caesars)/i)) {
+                    property = lines[j];
+                }
+            }
 
-            if title:
-                offers.append({
-                    'title': title,
-                    'section': section_name,
-                    'property': property_name,
-                    'dates': line,
-                    'offer_id': f"{title}-{line}".replace(' ', '-')[:50],
-                })
+            // Skip if no title
+            if (title) {
+                results.push({
+                    title: title,
+                    property: property,
+                    dates: dates,
+                    text: text.substring(0, 200)
+                });
+            }
+        }
+        return results;
+    """)
+
+    # Add section and generate offer_id
+    for o in offers:
+        o['section'] = section_name
+        o['offer_id'] = f"{o['title']}-{o.get('dates','')}".replace(' ', '-')[:50]
 
     return offers
 
