@@ -518,7 +518,13 @@ def scrape_caesars_offers(driver):
     section_count = len(see_more_elements)
     print(f"  Found {section_count} sections")
 
-    all_offers = []
+    # Check how many offer cards are on the main page
+    main_testid_count = driver.execute_script("return document.querySelectorAll('[data-testid=\"offer-details\"]').length")
+    print(f"  Main page offer-details count: {main_testid_count}")
+
+    # Scrape all visible offers on the main page first
+    all_offers = scrape_offers_from_current_page(driver, 'ALL')
+    print(f"  Main page offers: {len(all_offers)}")
 
     for idx in range(section_count):
         # Re-find elements each time (page reloads lose references)
@@ -548,6 +554,13 @@ def scrape_caesars_offers(driver):
 
         print(f"    URL: {driver.current_url[:80]}")
 
+        # Wait for offer cards to render on section page
+        for wait_i in range(5):
+            count = driver.execute_script("return document.querySelectorAll('[data-testid=\"offer-details\"]').length")
+            if count > 0:
+                break
+            human_delay(2, 3)
+
         # Scrape this section page
         page_offers = scrape_offers_from_current_page(driver, name)
         all_offers.extend(page_offers)
@@ -555,7 +568,9 @@ def scrape_caesars_offers(driver):
 
         if not page_offers:
             text = driver.find_element(By.TAG_NAME, 'body').text[:400]
-            print(f"    DEBUG: {text[:200]}")
+            # Also check for data-testid count
+            testid_count = driver.execute_script("return document.querySelectorAll('[data-testid=\"offer-details\"]').length")
+            print(f"    DEBUG: data-testid count={testid_count}, text={text[:150]}")
 
         # Handle pagination within the section
         page_num = 1
