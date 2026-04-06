@@ -17,7 +17,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install undetected-chromedriver selenium python-dotenv
+        run: pip install undetected-chromedriver selenium python-dotenv supabase
 
       - name: Install Chrome
         run: |
@@ -32,6 +32,8 @@ jobs:
         env:
           CAESARS_USERNAME: ${{ secrets.CAESARS_USERNAME }}
           CAESARS_PASSWORD: ${{ secrets.CAESARS_PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python test_caesars_login.py
 
       - name: Upload screenshots

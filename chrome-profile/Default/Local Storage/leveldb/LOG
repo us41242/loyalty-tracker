@@ -1,0 +1,9 @@
+2026/04/05-21:04:23.031 ba33be Reusing MANIFEST /Users/joshuaedrake/Documents/loyalty-tracker/chrome-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/04/05-21:04:23.034 ba33be Recovering log #3
+2026/04/05-21:04:23.035 ba33be Reusing old log /Users/joshuaedrake/Documents/loyalty-tracker/chrome-profile/Default/Local Storage/leveldb/000003.log 
+2026/04/05-21:05:23.040 ba33c1 Level-0 table #5: started
+2026/04/05-21:05:23.048 ba33c1 Level-0 table #5: 469986 bytes OK
+2026/04/05-21:05:23.053 ba33c1 Delete type=0 #3
+2026/04/05-21:05:36.633 ba3c05 Level-0 table #7: started
+2026/04/05-21:05:36.639 ba3c05 Level-0 table #7: 48518 bytes OK
+2026/04/05-21:05:36.643 ba3c05 Delete type=0 #4

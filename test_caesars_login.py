@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal Caesars login test — login and screenshot."""
 
-import os, re, time, random, json, platform, subprocess
+import os, re, time, random, json, platform, subprocess, base64, io, zipfile, tempfile
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -9,6 +9,9 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+from supabase import create_client
+supabase_client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 
 # Detect Chrome version
 chrome_ver = None
@@ -27,11 +30,43 @@ except:
 print(f"Chrome version: {chrome_ver or 'auto'}")
 print(f"CI: {os.environ.get('CI', 'false')}")
 
+# Download Chrome profile from Supabase
+profile_dir = None
+try:
+    meta = supabase_client.table('session_cookies').select('cookies').eq('site', 'chrome_profile_meta').execute()
+    if meta.data:
+        info = json.loads(meta.data[0]['cookies'])
+        num_chunks = info['chunks']
+        print(f"Downloading Chrome profile ({num_chunks} chunks, {info['size']/1024/1024:.1f} MB)...")
+
+        profile_b64 = ''
+        for i in range(num_chunks):
+            chunk = supabase_client.table('session_cookies').select('cookies').eq('site', f'chrome_profile_chunk_{i}').execute()
+            if chunk.data:
+                profile_b64 += json.loads(chunk.data[0]['cookies'])['data']
+            print(f"  Downloaded chunk {i+1}/{num_chunks}")
+
+        profile_bytes = base64.b64decode(profile_b64)
+        profile_dir = os.path.join(os.getcwd(), 'chrome-profile')
+        os.makedirs(profile_dir, exist_ok=True)
+
+        with zipfile.ZipFile(io.BytesIO(profile_bytes), 'r') as zf:
+            zf.extractall(profile_dir)
+
+        print(f"  ✅ Profile extracted to {profile_dir}")
+    else:
+        print("  No saved profile found in Supabase")
+except Exception as e:
+    print(f"  ⚠️ Could not load profile: {e}")
+
 options = uc.ChromeOptions()
 options.add_argument('--window-size=1920,1080')
 options.add_argument('--lang=en-US')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
+if profile_dir:
+    options.add_argument(f'--user-data-dir={profile_dir}')
+    print(f"Using saved profile: {profile_dir}")
 if os.environ.get('CI'):
     options.add_argument('--headless=new')
 
