@@ -16,7 +16,7 @@ import random
 import json
 from datetime import datetime, date, timezone, timedelta
 
-import undetected_chromedriver as uc
+from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -254,32 +254,28 @@ def save_rio_offers(offers):
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
 def make_driver(visible=False):
-    options = uc.ChromeOptions()
-    options.add_argument('--window-size=1920,1080')
-    options.add_argument('--lang=en-US')
     if visible:
+        # Local debug: use undetected_chromedriver to bypass bot detection
+        import undetected_chromedriver as uc
+        options = uc.ChromeOptions()
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--lang=en-US')
         options.add_argument('--start-maximized')
-    # DO NOT use --headless — detected by bot protection
-    # Use xvfb on Linux CI for a virtual display instead.
-
-    # Detect version from the exact binary uc will launch, so ChromeDriver matches.
-    chrome_ver = None
-    try:
-        import subprocess
-        chrome_path = uc.find_chrome_executable()
-        if chrome_path:
-            result = subprocess.run([chrome_path, '--version'], capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and result.stdout:
-                m = re.search(r'(\d+)\.', result.stdout)
-                if m:
-                    chrome_ver = int(m.group(1))
-                    print(f"  Chrome binary: {chrome_path} → version_main={chrome_ver}")
-    except Exception as e:
-        print(f"  ⚠️ Could not detect Chrome version: {e}")
-
-    if chrome_ver:
-        return uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
-    return uc.Chrome(options=options, use_subprocess=True)
+        # DO NOT use --headless — detected by bot protection
+        return uc.Chrome(options=options, use_subprocess=True)
+    else:
+        # CI / headless: use webdriver-manager for reliable Chrome+ChromeDriver matching
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        options = webdriver.ChromeOptions()
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--headless')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--lang=en-US')
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=options)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():

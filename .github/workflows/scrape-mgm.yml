@@ -20,13 +20,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install undetected-chromedriver selenium supabase python-dotenv
-
-      - name: Install Chrome + xvfb
-        run: |
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb xvfb
-          google-chrome --version
+        run: pip install selenium webdriver-manager supabase python-dotenv
 
       - name: Run MGM scraper
         env:
@@ -34,7 +28,7 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           MGM_EMAIL: ${{ secrets.MGM_EMAIL }}
           MGM_PASSWORD: ${{ secrets.MGM_PASSWORD }}
-        run: xvfb-run --auto-servernum python scrape_mgm.py
+        run: python scrape_mgm.py
 
       - name: Upload debug screenshots
         if: always()
