@@ -1,0 +1,46 @@
+name: Scrape MGM
+
+on:
+  schedule:
+    # 12:00 AM Pacific = 07:00 UTC (PDT)
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install undetected-chromedriver selenium supabase python-dotenv
+
+      - name: Install Chrome + xvfb
+        run: |
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb xvfb
+          google-chrome --version
+
+      - name: Run MGM scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          MGM_EMAIL: ${{ secrets.MGM_EMAIL }}
+          MGM_PASSWORD: ${{ secrets.MGM_PASSWORD }}
+        run: xvfb-run --auto-servernum python scrape_mgm.py
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 3

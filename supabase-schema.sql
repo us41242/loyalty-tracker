@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS rio_offers (
   valid_end   DATE,
   first_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(title, valid_start, valid_end)
+  UNIQUE(title, valid_end)
 );
 
 CREATE INDEX IF NOT EXISTS idx_rio_offers_valid ON rio_offers (valid_end DESC);

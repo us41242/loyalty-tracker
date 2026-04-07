@@ -143,6 +143,58 @@ def parse_date(date_str):
         return f"{m.group(3)}-{months[m.group(1)]}-{m.group(2).zfill(2)}"
     return date_str
 
+def parse_caesars_dates(dates_str):
+    """
+    Parse Caesars offer date strings into (valid_start, valid_end, expires_at).
+    Returns a 3-tuple of YYYY-MM-DD strings or None. Relative strings are always
+    resolved to actual calendar dates at call time — nothing relative is stored.
+
+    Examples (assuming today is 2026-04-07):
+        "Expires today"             -> (None, None, "2026-04-07")
+        "Expires tomorrow"          -> (None, None, "2026-04-08")
+        "Expires in 2 days"         -> (None, None, "2026-04-09")
+        "Expires 04.30.26"          -> (None, None, "2026-04-30")
+        "Valid 04.07.26 - 04.30.26" -> ("2026-04-07", "2026-04-30", "2026-04-30")
+    """
+    if not dates_str:
+        return None, None, None
+
+    today = date.today()
+
+    def _parse_mmdyy(s):
+        m = re.match(r'(\d{2})\.(\d{2})\.(\d{2})', s.strip())
+        if m:
+            return date(2000 + int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        return None
+
+    if re.match(r'expires?\s+today', dates_str, re.IGNORECASE):
+        return None, None, today.isoformat()
+
+    if re.match(r'expires?\s+tomorrow', dates_str, re.IGNORECASE):
+        return None, None, (today + timedelta(days=1)).isoformat()
+
+    m = re.match(r'expires?\s+in\s+(\d+)\s+days?', dates_str, re.IGNORECASE)
+    if m:
+        exp = today + timedelta(days=int(m.group(1)))
+        return None, None, exp.isoformat()
+
+    # "Valid MM.DD.YY - MM.DD.YY"
+    m = re.match(r'valid\s+(\d{2}\.\d{2}\.\d{2})\s*-\s*(\d{2}\.\d{2}\.\d{2})', dates_str, re.IGNORECASE)
+    if m:
+        start = _parse_mmdyy(m.group(1))
+        end = _parse_mmdyy(m.group(2))
+        return (start.isoformat() if start else None,
+                end.isoformat() if end else None,
+                end.isoformat() if end else None)
+
+    # "Expires MM.DD.YY"
+    m = re.match(r'expires?\s+(\d{2}\.\d{2}\.\d{2})', dates_str, re.IGNORECASE)
+    if m:
+        exp = _parse_mmdyy(m.group(1))
+        return None, None, exp.isoformat() if exp else None
+
+    return None, None, None
+
 _last_used_mfa_message_id = None
 
 def _prime_last_mfa_id():
@@ -440,88 +492,53 @@ def scrape_caesars_reservations(driver, tab='past'):
     print(f"  Found {len(reservations)} {tab} reservations")
     return reservations
 
+def _clear_caesars_offer_filter(driver):
+    """Remove the location filter on the offers page if one is active."""
+    try:
+        body_text = driver.find_element(By.TAG_NAME, 'body').text
+        if 'Filters Applied' not in body_text:
+            return
+        print("  🔍 Location filter detected — clearing...")
+        filter_btn = driver.find_element(By.CSS_SELECTOR, '[aria-label="Open filter menu"]')
+        filter_btn.click()
+        human_delay(1.5, 2.5)
+        # Find Clear/Reset button inside the now-open filter panel
+        for btn in driver.find_elements(By.CSS_SELECTOR, '[role="button"], button'):
+            if btn.text.strip().upper() in ('CLEAR', 'CLEAR ALL', 'RESET', 'CLEAR FILTERS'):
+                btn.click()
+                human_delay(1, 2)
+                break
+        # Click Apply/Done to close the panel
+        for btn in driver.find_elements(By.CSS_SELECTOR, '[role="button"], button'):
+            if btn.text.strip().upper() in ('APPLY', 'DONE', 'SAVE'):
+                btn.click()
+                human_delay(1.5, 2.5)
+                break
+    except Exception as e:
+        print(f"  ⚠️ Could not clear filter: {e}")
+
+
 def scrape_caesars_offers(driver):
     print("🎁 Scraping offers...")
     driver.get('https://www.caesars.com/rewards/offers')
     human_delay(4, 6)
 
-    # Clear filters
-    try:
-        buttons = driver.find_elements(By.CSS_SELECTOR, 'button, a')
-        for btn in buttons:
-            if btn.text.strip() == 'Clear Filters' and btn.is_displayed():
-                btn.click()
-                human_delay(2, 3)
-                break
-    except:
-        pass
-
+    _clear_caesars_offer_filter(driver)
     human_delay(2, 3)
 
-    # Scroll down to make all sections visible
+    # Scroll to load all sections
     for _ in range(5):
         driver.execute_script("window.scrollBy(0, 800);")
-        human_delay(1, 2)
+        human_delay(0.8, 1.2)
     driver.execute_script("window.scrollTo(0, 0);")
     human_delay(1, 2)
 
-    # Step 1: Find "See More" links using the known XPath pattern
-    # The sections are at: ...div[3]/div[2]/div[N]/div[1]/div[2]
-    # where N = 1 (expiring), 2 (april), 3 (may), 4 (june), etc.
-    base_xpath = '//*[@id="root"]/div/div/div/div/div[1]/div/div/div/div/div[2]/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div[1]/div/div/div/div[2]/div[2]/div/div[2]/div/div[1]/div/div/div/div[3]/div/div[2]/div/div/div/div/div/div/div[3]/div[2]'
-
-    section_names = [
-        'EXPIRING IN THE NEXT 7 DAYS',
-        'APRIL OFFERS',
-        'MAY OFFERS',
-        'JUNE OFFERS',
-        'JULY OFFERS',
-        'AUGUST OFFERS',
-        'SEPTEMBER OFFERS',
-        'OCTOBER OFFERS',
-    ]
-
-    see_more_links = []
-    for idx in range(1, 10):
-        try:
-            xpath = f'{base_xpath}/div[{idx}]/div[1]/div[2]'
-            el = driver.find_element(By.XPATH, xpath)
-            if el.is_displayed():
-                # Get the href from a link inside or nearby
-                link_el = el.find_element(By.TAG_NAME, 'a') if el.tag_name != 'a' else el
-                href = link_el.get_attribute('href') or ''
-                name = section_names[idx-1] if idx-1 < len(section_names) else f'SECTION {idx}'
-                see_more_links.append({'href': href, 'name': name, 'xpath': xpath})
-                print(f"  Found section: {name} -> {href[:60]}")
-        except:
-            break
-
-    # Fallback: try finding "See More" links by text
-    if not see_more_links:
-        print("  XPath sections not found, trying text search...")
-        links = driver.find_elements(By.TAG_NAME, 'a')
-        for link in links:
-            try:
-                text = link.text.strip()
-                href = link.get_attribute('href') or ''
-                if 'See More' in text and href and 'offers' in href.lower():
-                    see_more_links.append({'href': href, 'name': text, 'xpath': ''})
-                    print(f"  Found link: {text} -> {href[:60]}")
-            except:
-                continue
-
-    # The "See More" buttons are <div role="button"> elements with no href.
-    # They navigate via React click handlers.
-    # Strategy: click each one, scrape the resulting page, then go back.
-
-    see_more_elements = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"]')
-    section_count = len(see_more_elements)
+    section_count = len(driver.find_elements(By.CSS_SELECTOR, '[data-testid="offer-group-see-more-button"]'))
     print(f"  Found {section_count} sections")
 
     all_offers = []
 
     for idx in range(section_count):
-        # Navigate back to offers page each time
         driver.get('https://www.caesars.com/rewards/offers')
         human_delay(3, 5)
 
@@ -532,29 +549,29 @@ def scrape_caesars_offers(driver):
         driver.execute_script("window.scrollTo(0, 0);")
         human_delay(1, 2)
 
-        # Re-find "See More" buttons
-        see_more = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="See more"]')
+        see_more = driver.find_elements(By.CSS_SELECTOR, '[data-testid="offer-group-see-more-button"]')
+        section_titles = driver.find_elements(By.CSS_SELECTOR, '[data-testid="offer-group-section-title"]')
         if idx >= len(see_more):
             break
 
-        label = see_more[idx].get_attribute('aria-label') or ''
-        name = label.replace('See more ', '').strip()
+        # Section title — strip trailing count like "(28)"
+        raw_name = section_titles[idx].text.strip() if idx < len(section_titles) else f'Section {idx+1}'
+        name = re.sub(r'\s*\(\d+\)\s*$', '', raw_name).strip()
         print(f"  📂 Section: {name}...")
 
-        # Click "See More" to go to section page
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", see_more[idx])
         human_delay(0.5, 1)
         see_more[idx].click()
         human_delay(3, 5)
 
-        # Wait for offer cards to load
+        # Wait for offer cards
         for _ in range(5):
-            count = driver.execute_script("return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
+            count = driver.execute_script(
+                "return document.querySelectorAll('[aria-label=\"Open Offer Details\"]').length")
             if count > 0:
                 break
             human_delay(2, 3)
 
-        # Click the FIRST offer card to open details panel
         first_card = driver.find_elements(By.CSS_SELECTOR, '[aria-label="Open Offer Details"]')
         if not first_card:
             print(f"    No offer cards found")
@@ -563,20 +580,23 @@ def scrape_caesars_offers(driver):
         first_card[0].click()
         human_delay(1.5, 2.5)
 
-        # Cycle through ALL offers using "View details of NEXT offer" button
-        # The overlay panel structure (from Close button walking up):
-        #   [1] Title (e.g., "KIOSK GAME IN VEGAS")
-        #   [2] Dates (e.g., "Expires today" or "Valid 04.07.26 - 04.07.26")
-        #   [3] Offer ID (e.g., "Offer 1NC56HC10X04")
-        #   [5] Description
-        #   [6+] AVAILABLE HOTELS & RESORTS, properties list
+        # Cycle through ALL offers using the NEXT button in the detail panel.
+        # Panel structure (read from innerText, newline-split):
+        #   Title line
+        #   "Expires today" / "Valid MM.DD.YY - MM.DD.YY"
+        #   "Offer <CODE>"
+        #   "ADD TO MY CALENDAR"
+        #   Description
+        #   "AVAILABLE HOTELS & RESORTS"
+        #   ...property names...
+        #   "HOW TO REDEEM:"
         offer_count = 0
         seen_offer_ids = set()
-        max_offers = 100
+        max_offers = 150
 
         while offer_count < max_offers:
             offer = driver.execute_script("""
-                // Find overlay by walking up from Close button
+                // Anchor on the Close button to find the overlay container
                 var closeBtn = null;
                 var allEls = document.querySelectorAll('[role="button"]');
                 for (var i = 0; i < allEls.length; i++) {
@@ -592,16 +612,15 @@ def scrape_caesars_offers(driver):
                     if (overlay && overlay.offsetHeight > 800) break;
                 }
 
-                var text = overlay.innerText;
-                var lines = text.split('\\n').map(function(l){return l.trim()}).filter(function(l){return l});
+                var lines = overlay.innerText
+                    .split('\\n')
+                    .map(function(l){ return l.trim(); })
+                    .filter(function(l){ return l; });
 
-                var title = '';
-                var dates = '';
-                var offerId = '';
-                var description = '';
+                var title = '', dates = '', offerId = '', description = '';
                 var properties = [];
-
                 var inProperties = false;
+
                 for (var k = 0; k < lines.length; k++) {
                     if (lines[k].match(/^Offer\\s+[A-Z0-9]/)) {
                         offerId = lines[k].replace(/^Offer\\s+/, '').trim();
@@ -620,20 +639,19 @@ def scrape_caesars_offers(driver):
                     }
                 }
 
-                // Title is the first non-empty line that isn't a nav item
-                for (var m = 0; m < Math.min(lines.length, 5); m++) {
-                    if (lines[m].length > 2 &&
-                        !lines[m].match(/^(Close|EXPIRING|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)/i) &&
-                        lines[m] !== dates && !lines[m].match(/^Offer\\s/) &&
-                        lines[m] !== 'ADD TO MY CALENDAR') {
+                // Title: first meaningful line that isn't a nav/date/offer-id/calendar label
+                var skipPat = /^(Close|EXPIRING|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|ADD TO MY CALENDAR)/i;
+                for (var m = 0; m < Math.min(lines.length, 8); m++) {
+                    if (lines[m].length > 2 && !skipPat.test(lines[m]) &&
+                        lines[m] !== dates && !lines[m].match(/^Offer\\s/)) {
                         title = lines[m]; break;
                     }
                 }
 
-                // Description: line after "ADD TO MY CALENDAR" or after offer ID
+                // Description: line immediately after "ADD TO MY CALENDAR"
                 for (var n = 0; n < lines.length; n++) {
-                    if (lines[n] === 'ADD TO MY CALENDAR' && n+1 < lines.length) {
-                        description = lines[n+1]; break;
+                    if (lines[n] === 'ADD TO MY CALENDAR' && n + 1 < lines.length) {
+                        description = lines[n + 1]; break;
                     }
                 }
 
@@ -651,7 +669,7 @@ def scrape_caesars_offers(driver):
 
             oid = offer['offerId']
             if oid in seen_offer_ids:
-                break  # Looped back to start
+                break  # cycled back to start
 
             seen_offer_ids.add(oid)
             offer['section'] = name
@@ -659,7 +677,6 @@ def scrape_caesars_offers(driver):
             all_offers.append(offer)
             offer_count += 1
 
-            # Click NEXT
             next_btn = driver.find_elements(By.CSS_SELECTOR, '[aria-label*="NEXT offer"]')
             if not next_btn:
                 break
@@ -668,24 +685,23 @@ def scrape_caesars_offers(driver):
 
         # Close the detail panel
         try:
-            close_btns = driver.find_elements(By.CSS_SELECTOR, '[role="button"]')
-            for cb in close_btns:
+            for cb in driver.find_elements(By.CSS_SELECTOR, '[role="button"]'):
                 if cb.text.strip() == 'Close':
                     cb.click()
                     break
-        except:
+        except Exception:
             pass
         human_delay(1, 2)
 
         print(f"    {offer_count} offers scraped")
 
-    # Deduplicate by title+dates
+    # Deduplicate by offer_id (unique per the schema)
     seen = set()
     unique_offers = []
     for o in all_offers:
-        key = f"{o.get('title','')}-{o.get('dates','')}"
-        if key not in seen:
-            seen.add(key)
+        oid = o.get('offer_id', '')
+        if oid and oid not in seen:
+            seen.add(oid)
             unique_offers.append(o)
 
     print(f"  Found {len(unique_offers)} total unique offers")
@@ -1079,11 +1095,16 @@ def save_caesars_offers(offers):
     for o in offers:
         if not o.get('offer_id') or not o.get('title'):
             continue
+        valid_start, valid_end, expires_at = parse_caesars_dates(o.get('dates'))
         supabase.table('caesars_offers').upsert({
-            'run_ts': RUN_TS,
             'offer_id': o['offer_id'],
             'title': o['title'],
+            'description': o.get('description') or None,
             'section': o.get('section'),
+            'eligible_properties': o.get('properties') or None,
+            'valid_start': valid_start,
+            'valid_end': valid_end,
+            'expires_at': expires_at,
             'last_seen': datetime.now().isoformat(),
         }, on_conflict='offer_id').execute()
         saved += 1
@@ -1159,13 +1180,24 @@ def save_mgm_trips(trips):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--visible', action='store_true',
+                        help='Open a visible Chrome window (local debugging)')
+    args = parser.parse_args()
+    visible = args.visible or bool(os.environ.get('LOCAL_DEBUG'))
+
     start = time.time()
     print("🚀 Casino Loyalty Tracker (undetected-chromedriver)")
     print(f"   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} PT\n")
+    if visible:
+        print("  👁  Visible mode — Chrome window will open\n")
 
     options = uc.ChromeOptions()
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--lang=en-US')
+    if visible:
+        options.add_argument('--start-maximized')
     # DO NOT use --headless — Imperva detects it
     # Use xvfb on Linux CI for a virtual display instead
 
