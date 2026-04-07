@@ -253,8 +253,39 @@ def save_rio_offers(offers):
     print(f"  💾 Saved {saved} offers")
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
-def make_driver(visible=False):
+def _detect_chrome_version():
+    """Return the installed Chrome major version as an int, or None if undetectable."""
     import subprocess, platform
+    if platform.system() == 'Darwin':
+        candidates = [
+            ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '--version'],
+        ]
+    else:
+        candidates = [
+            ['/usr/bin/google-chrome-stable', '--version'],
+            ['/usr/bin/google-chrome', '--version'],
+            ['google-chrome-stable', '--version'],
+            ['google-chrome', '--version'],
+            ['/usr/bin/chromium-browser', '--version'],
+            ['chromium-browser', '--version'],
+            ['chromium', '--version'],
+        ]
+    for cmd in candidates:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout:
+                m = re.search(r'(\d+)\.', result.stdout)
+                if m:
+                    ver = int(m.group(1))
+                    print(f"  Chrome detected: {result.stdout.strip()} → version_main={ver}")
+                    return ver
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            continue
+    print("  ⚠️  Chrome version not detected — letting undetected-chromedriver auto-detect")
+    return None
+
+
+def make_driver(visible=False):
     options = uc.ChromeOptions()
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--lang=en-US')
@@ -263,22 +294,7 @@ def make_driver(visible=False):
     # DO NOT use --headless — detected by bot protection
     # Use xvfb on Linux CI for a virtual display instead
 
-    chrome_ver = None
-    try:
-        if platform.system() == 'Darwin':
-            result = subprocess.run(
-                ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '--version'],
-                capture_output=True, text=True)
-        else:
-            result = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
-            if result.returncode != 0:
-                result = subprocess.run(['chromium', '--version'], capture_output=True, text=True)
-        m = re.search(r'(\d+)\.', result.stdout)
-        chrome_ver = int(m.group(1)) if m else None
-    except Exception:
-        pass
-
-    print(f"  Chrome version: {chrome_ver or 'auto-detect'}")
+    chrome_ver = _detect_chrome_version()
     if chrome_ver:
         return uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
     return uc.Chrome(options=options, use_subprocess=True)
