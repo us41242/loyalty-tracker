@@ -680,39 +680,6 @@ def save_caesars_offers(offers):
     print(f"  💾 Saved {saved} offers")
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
-def _detect_chrome_version():
-    """Return the installed Chrome major version as an int, or None if undetectable."""
-    import subprocess, platform
-    if platform.system() == 'Darwin':
-        candidates = [
-            ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '--version'],
-        ]
-    else:
-        # Try absolute paths first (reliable on GitHub Actions), then PATH-based names
-        candidates = [
-            ['/usr/bin/google-chrome-stable', '--version'],
-            ['/usr/bin/google-chrome', '--version'],
-            ['google-chrome-stable', '--version'],
-            ['google-chrome', '--version'],
-            ['/usr/bin/chromium-browser', '--version'],
-            ['chromium-browser', '--version'],
-            ['chromium', '--version'],
-        ]
-    for cmd in candidates:
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and result.stdout:
-                m = re.search(r'(\d+)\.', result.stdout)
-                if m:
-                    ver = int(m.group(1))
-                    print(f"  Chrome detected: {result.stdout.strip()} → version_main={ver}")
-                    return ver
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-            continue
-    print("  ⚠️  Chrome version not detected — letting undetected-chromedriver auto-detect")
-    return None
-
-
 def make_driver(visible=False):
     options = uc.ChromeOptions()
     options.add_argument('--window-size=1920,1080')
@@ -720,11 +687,9 @@ def make_driver(visible=False):
     if visible:
         options.add_argument('--start-maximized')
     # DO NOT use --headless — Imperva detects it
-    # Use xvfb on Linux CI for a virtual display instead
-
-    chrome_ver = _detect_chrome_version()
-    if chrome_ver:
-        return uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
+    # DO NOT pass version_main — uc matches ChromeDriver to the binary it actually launches;
+    # manual detection can point to a different Chrome binary and cause a version mismatch.
+    # Use xvfb on Linux CI for a virtual display instead.
     return uc.Chrome(options=options, use_subprocess=True)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
