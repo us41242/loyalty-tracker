@@ -687,9 +687,25 @@ def make_driver(visible=False):
     if visible:
         options.add_argument('--start-maximized')
     # DO NOT use --headless — Imperva detects it
-    # DO NOT pass version_main — uc matches ChromeDriver to the binary it actually launches;
-    # manual detection can point to a different Chrome binary and cause a version mismatch.
     # Use xvfb on Linux CI for a virtual display instead.
+
+    # Detect version from the exact binary uc will launch, so ChromeDriver matches.
+    chrome_ver = None
+    try:
+        import subprocess
+        chrome_path = uc.find_chrome_executable()
+        if chrome_path:
+            result = subprocess.run([chrome_path, '--version'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout:
+                m = re.search(r'(\d+)\.', result.stdout)
+                if m:
+                    chrome_ver = int(m.group(1))
+                    print(f"  Chrome binary: {chrome_path} → version_main={chrome_ver}")
+    except Exception as e:
+        print(f"  ⚠️ Could not detect Chrome version: {e}")
+
+    if chrome_ver:
+        return uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
     return uc.Chrome(options=options, use_subprocess=True)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
