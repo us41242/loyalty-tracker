@@ -20,7 +20,19 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install selenium webdriver-manager supabase python-dotenv
+        run: pip install undetected-chromedriver selenium supabase python-dotenv
+
+      - name: Install Chrome + xvfb
+        run: |
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb xvfb
+          google-chrome-stable --version
+
+      - name: Detect Chrome version
+        run: |
+          CHROME_VERSION=$(google-chrome-stable --version | grep -oP '\d+' | head -1)
+          echo "CHROME_VERSION=$CHROME_VERSION" >> $GITHUB_ENV
+          echo "Detected Chrome version: $CHROME_VERSION"
 
       - name: Run Caesars scraper
         env:
@@ -31,7 +43,7 @@ jobs:
           GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
           GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
-        run: python scrape_caesars.py
+        run: xvfb-run --auto-servernum python scrape_caesars.py
 
       - name: Upload debug screenshots
         if: always()
