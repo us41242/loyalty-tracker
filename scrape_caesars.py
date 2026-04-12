@@ -358,6 +358,10 @@ def get_sectoken(driver):
             return cookie['value']
     return None
 
+def get_all_cookies_string(driver):
+    """Extract all browser cookies as a single Cookie header string."""
+    return '; '.join(f"{c['name']}={c['value']}" for c in driver.get_cookies())
+
 def _api_request(url, sectoken=None, method='GET', body=None, cookies=None):
     """Make an API request to Caesars with the session token."""
     headers = {
@@ -374,7 +378,7 @@ def _api_request(url, sectoken=None, method='GET', body=None, cookies=None):
     resp = urllib.request.urlopen(req, timeout=30)
     return json.loads(resp.read())
 
-def fetch_caesars_offers_api(sectoken):
+def fetch_caesars_offers_api(sectoken, cookie_string=None):
     """Fetch offers via the GetOfferList API."""
     print("🎁 Fetching offers via API...")
     url = 'https://www.caesars.com/asp_net/proxy.aspx?lb://OffersIntegrationService/OfferManager.svc/rest/GetOfferList'
@@ -382,7 +386,7 @@ def fetch_caesars_offers_api(sectoken):
         'source': 'all',
         'header': {'sectoken': sectoken},
     }
-    cookies = f'sectoken={sectoken}'
+    cookies = cookie_string or f'sectoken={sectoken}'
     result = _api_request(url, body=body, cookies=cookies)
     if result.get('header', {}).get('status') != 'SUCCESS':
         print(f"  ⚠️ Offers API returned: {result.get('header')}")
@@ -391,14 +395,14 @@ def fetch_caesars_offers_api(sectoken):
     print(f"  ✅ Got {len(offers)} offers from API")
     return offers
 
-def fetch_caesars_reservations_api(sectoken):
+def fetch_caesars_reservations_api(sectoken, cookie_string=None):
     """Fetch reservations via the GetTRReservations API."""
     print("📋 Fetching reservations via API...")
     url = (
         'https://www.caesars.com/asp_net/proxy.aspx?lb://prodmercury/mercury/GetTRReservations'
         f'?responseformat=json&primaryaccttoken={urllib.parse.quote(sectoken)}'
     )
-    cookies = f'sectoken={sectoken}'
+    cookies = cookie_string or f'sectoken={sectoken}'
     result = _api_request(url, cookies=cookies)
     reservations = result.get('reservations', [])
     print(f"  ✅ Got {len(reservations)} reservations from API")
@@ -845,18 +849,19 @@ def main():
 
         # ── API-based fetching (reservations + offers) ───────────────
         sectoken = get_sectoken(driver)
+        cookie_string = get_all_cookies_string(driver)
         reservations = []
         offers = []
         if sectoken:
             print(f"  🔑 Got sectoken ({len(sectoken)} chars)")
             try:
-                reservations = fetch_caesars_reservations_api(sectoken)
+                reservations = fetch_caesars_reservations_api(sectoken, cookie_string)
             except Exception as e:
                 print(f"  ⚠️ Reservations API failed, falling back to scraper: {e}")
                 reservations = scrape_caesars_reservations(driver, 'past')
                 reservations += scrape_caesars_reservations(driver, 'current')
             try:
-                offers = fetch_caesars_offers_api(sectoken)
+                offers = fetch_caesars_offers_api(sectoken, cookie_string)
             except Exception as e:
                 print(f"  ⚠️ Offers API failed, falling back to scraper: {e}")
                 offers = scrape_caesars_offers(driver)
