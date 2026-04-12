@@ -13,6 +13,8 @@ import sys
 import time
 import random
 import json
+import urllib.request
+import urllib.parse
 from datetime import datetime, date, timezone, timedelta
 
 import undetected_chromedriver as uc
@@ -326,7 +328,83 @@ def handle_caesars_2fa(driver):
             break
     print(f"  ✅ 2FA complete, URL: {driver.current_url}")
 
-# ── Scraping ──────────────────────────────────────────────────────────────────
+# ── Property code mapping ────────────────────────────────────────────────────
+PROPERTY_CODES = {
+    'BLV': "Bally's Las Vegas",
+    'CLV': 'Caesars Palace Las Vegas',
+    'DLV': 'The LINQ Hotel + Experience',
+    'FLV': 'Flamingo Las Vegas',
+    'ILV': "Harrah's Las Vegas",
+    'LAS': 'Rio Hotel & Casino',
+    'PHV': 'Paris Las Vegas',
+    'PLV': 'Planet Hollywood Resort & Casino',
+    'HLT': "Harrah's / Caesars Lake Tahoe",
+    'TAH': 'Caesars Republic Lake Tahoe',
+    'CCE': 'Caesars Republic Lake Tahoe',
+    'SIL': 'Silver Legacy Reno',
+    'ELR': 'Eldorado Reno',
+    'NOR': "Horseshoe Las Vegas",
+    'HAC': "Harrah's Atlantic City",
+    'CAC': 'Caesars Atlantic City',
+    'BAC': "Bally's Atlantic City",
+    'HNO': "Harrah's New Orleans",
+}
+
+# ── API-based data fetching ──────────────────────────────────────────────────
+def get_sectoken(driver):
+    """Extract the sectoken JWT from the browser cookies."""
+    for cookie in driver.get_cookies():
+        if cookie['name'] == 'sectoken':
+            return cookie['value']
+    return None
+
+def _api_request(url, sectoken=None, method='GET', body=None, cookies=None):
+    """Make an API request to Caesars with the session token."""
+    headers = {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'Origin': 'https://www.caesars.com',
+        'Referer': 'https://www.caesars.com/rewards/offers',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    }
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    if cookies:
+        req.add_header('Cookie', cookies)
+    resp = urllib.request.urlopen(req, timeout=30)
+    return json.loads(resp.read())
+
+def fetch_caesars_offers_api(sectoken):
+    """Fetch offers via the GetOfferList API."""
+    print("🎁 Fetching offers via API...")
+    url = 'https://www.caesars.com/asp_net/proxy.aspx?lb://OffersIntegrationService/OfferManager.svc/rest/GetOfferList'
+    body = {
+        'source': 'all',
+        'header': {'sectoken': sectoken},
+    }
+    cookies = f'sectoken={sectoken}'
+    result = _api_request(url, body=body, cookies=cookies)
+    if result.get('header', {}).get('status') != 'SUCCESS':
+        print(f"  ⚠️ Offers API returned: {result.get('header')}")
+        return []
+    offers = result.get('offers', [])
+    print(f"  ✅ Got {len(offers)} offers from API")
+    return offers
+
+def fetch_caesars_reservations_api(sectoken):
+    """Fetch reservations via the GetTRReservations API."""
+    print("📋 Fetching reservations via API...")
+    url = (
+        'https://www.caesars.com/asp_net/proxy.aspx?lb://prodmercury/mercury/GetTRReservations'
+        f'?responseformat=json&primaryaccttoken={urllib.parse.quote(sectoken)}'
+    )
+    cookies = f'sectoken={sectoken}'
+    result = _api_request(url, cookies=cookies)
+    reservations = result.get('reservations', [])
+    print(f"  ✅ Got {len(reservations)} reservations from API")
+    return reservations
+
+# ── Scraping (rewards + great gift only) ─────────────────────────────────────
 def scrape_caesars_rewards(driver):
     print("📊 Scraping rewards home...")
     driver.get('https://www.caesars.com/rewards/home')
@@ -642,19 +720,39 @@ def save_caesars_snapshot(data):
 
 def save_caesars_reservations(reservations):
     for r in reservations:
-        if not r.get('confirmation_code'):
+        conf = r.get('confirmationCode') or r.get('confirmation_code')
+        if not conf:
             continue
+        # Handle API format (MM-DD-YYYY) and scraper format
+        check_in = r.get('checkInDate') or r.get('check_in')
+        check_out = r.get('checkOutDate') or r.get('check_out')
+        if check_in and re.match(r'\d{2}-\d{2}-\d{4}', check_in):
+            mm, dd, yyyy = check_in.split('-')
+            check_in = f"{mm}/{dd}/{yyyy}"
+        if check_out and re.match(r'\d{2}-\d{2}-\d{4}', check_out):
+            mm, dd, yyyy = check_out.split('-')
+            check_out = f"{mm}/{dd}/{yyyy}"
+        prop_code = r.get('propertyCode', '')
+        property_name = PROPERTY_CODES.get(prop_code, r.get('property') or prop_code)
+        state = r.get('state', '').upper()
+        tab = 'current' if state in ('FUTURE', 'CURRENT') else 'past'
+        adults = r.get('adults')
+        if isinstance(adults, str) and adults.isdigit():
+            adults = int(adults)
+        children = r.get('children')
+        if isinstance(children, str) and children.isdigit():
+            children = int(children)
         supabase.table('caesars_reservations').upsert({
-            'run_ts': RUN_TS,
-            'confirmation_code': r['confirmation_code'],
-            'property': r.get('property'),
+            'confirmation_code': conf,
+            'property': property_name,
             'location': r.get('location'),
-            'check_in': parse_date(r.get('check_in')),
-            'check_out': parse_date(r.get('check_out')),
-            'adults': r.get('adults'),
-            'children': r.get('children'),
-            'status': 'Active',
-            'tab': r.get('tab'),
+            'check_in': parse_date(check_in),
+            'check_out': parse_date(check_out),
+            'adults': adults,
+            'children': children,
+            'room_type': r.get('roomTypeTitle') or r.get('room_type'),
+            'status': r.get('status', 'Booked'),
+            'tab': tab,
             'updated_at': datetime.now().isoformat(),
         }, on_conflict='confirmation_code').execute()
     print(f"  💾 Saved {len(reservations)} reservations")
@@ -662,15 +760,36 @@ def save_caesars_reservations(reservations):
 def save_caesars_offers(offers):
     saved = 0
     for o in offers:
-        if not o.get('offer_id') or not o.get('title'):
+        # Handle API format and scraper format
+        offer_id = o.get('id') or o.get('offer_id')
+        title = o.get('title')
+        if not offer_id or not title:
             continue
-        valid_start, valid_end, expires_at = parse_caesars_dates(o.get('dates'))
+
+        # API format: start/end are ISO datetime strings
+        if o.get('start'):
+            valid_start = o['start'][:10]  # "2026-04-12T00:00:00" -> "2026-04-12"
+            valid_end = o['end'][:10] if o.get('end') else None
+            expires_at = valid_end
+        else:
+            valid_start, valid_end, expires_at = parse_caesars_dates(o.get('dates'))
+
+        # API provides propertyList as list of codes; scraper had comma-separated names
+        prop_list = o.get('propertyList')
+        if isinstance(prop_list, list):
+            prop_names = [PROPERTY_CODES.get(c, c) for c in prop_list]
+            eligible_properties = ', '.join(prop_names)
+        else:
+            eligible_properties = o.get('properties') or o.get('eligible_properties')
+
+        section = o.get('refinedType') or o.get('type') or o.get('section')
+
         supabase.table('caesars_offers').upsert({
-            'offer_id': o['offer_id'],
-            'title': o['title'],
+            'offer_id': offer_id,
+            'title': title,
             'description': o.get('description') or None,
-            'section': o.get('section'),
-            'eligible_properties': o.get('properties') or None,
+            'section': section,
+            'eligible_properties': eligible_properties,
             'valid_start': valid_start,
             'valid_end': valid_end,
             'expires_at': expires_at,
@@ -723,10 +842,31 @@ def main():
     exit_code = 0
     try:
         caesars_login(driver)
-        reservations = scrape_caesars_reservations(driver, 'past')
-        reservations += scrape_caesars_reservations(driver, 'current')
-        offers = scrape_caesars_offers(driver)
 
+        # ── API-based fetching (reservations + offers) ───────────────
+        sectoken = get_sectoken(driver)
+        reservations = []
+        offers = []
+        if sectoken:
+            print(f"  🔑 Got sectoken ({len(sectoken)} chars)")
+            try:
+                reservations = fetch_caesars_reservations_api(sectoken)
+            except Exception as e:
+                print(f"  ⚠️ Reservations API failed, falling back to scraper: {e}")
+                reservations = scrape_caesars_reservations(driver, 'past')
+                reservations += scrape_caesars_reservations(driver, 'current')
+            try:
+                offers = fetch_caesars_offers_api(sectoken)
+            except Exception as e:
+                print(f"  ⚠️ Offers API failed, falling back to scraper: {e}")
+                offers = scrape_caesars_offers(driver)
+        else:
+            print("  ⚠️ No sectoken found, using browser scraping")
+            reservations = scrape_caesars_reservations(driver, 'past')
+            reservations += scrape_caesars_reservations(driver, 'current')
+            offers = scrape_caesars_offers(driver)
+
+        # ── Browser scraping (rewards + great gift) ──────────────────
         rewards = scrape_caesars_rewards(driver)
         great_gift = scrape_caesars_great_gift(driver)
         rewards['great_gift_points'] = great_gift

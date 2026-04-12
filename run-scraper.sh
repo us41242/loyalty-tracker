@@ -12,7 +12,7 @@ mkdir -p logs
 LOG_FILE="logs/scrape-$(date +%Y-%m-%d).log"
 
 echo "=== Scraper started at $(date) ===" >> "$LOG_FILE" 2>&1
-/usr/bin/python3 scraper.py >> "$LOG_FILE" 2>&1
+/opt/homebrew/bin/node index.js >> "$LOG_FILE" 2>&1
 echo "=== Scraper finished at $(date) ===" >> "$LOG_FILE" 2>&1
 
 # Keep only last 30 days of logs
