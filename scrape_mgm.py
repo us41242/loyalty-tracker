@@ -15,7 +15,7 @@ import random
 import json
 from datetime import datetime, date, timezone, timedelta
 
-import undetected_chromedriver as uc
+from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -165,22 +165,6 @@ def mgm_login(driver):
         else:
             print("  🍪 Cookies expired, doing full login...")
 
-    # Suppress the "undetected chromedriver 1337!" console message that
-    # gets picked up by LogRocket and triggers MGM's bot detection.
-    try:
-        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-            'source': '''
-                const _origLog = console.log;
-                console.log = function(...args) {
-                    if (args.length === 1 && typeof args[0] === 'string' && args[0].includes('1337'))
-                        return;
-                    return _origLog.apply(console, args);
-                };
-            '''
-        })
-    except Exception as e:
-        print(f"  (could not inject console filter: {e})")
-
     # Navigate to homepage first like a real user
     driver.get('https://www.mgmresorts.com/')
     human_delay(4, 7)
@@ -243,12 +227,6 @@ def mgm_login(driver):
         print(f"  Page text preview: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
         raise Exception("MGM login failed: no email input found")
 
-    # Enable network logging to capture the API response
-    try:
-        driver.execute_cdp_cmd('Network.enable', {})
-    except Exception:
-        pass
-
     # Click the field, pause, then type slowly
     email_input.click()
     human_delay(0.5, 1.0)
@@ -262,32 +240,11 @@ def mgm_login(driver):
     human_click(driver, submit_btn)
     human_delay(4, 7)
 
-    # Capture network logs to see what API returned
-    try:
-        perf_logs = driver.get_log('performance')
-        for entry in perf_logs[-30:]:
-            msg = json.loads(entry['message'])['message']
-            if msg.get('method') == 'Network.responseReceived':
-                url = msg['params']['response']['url']
-                status = msg['params']['response']['status']
-                if 'identity' in url or 'auth' in url or 'login' in url or status >= 400:
-                    print(f"  🌐 {status} {url[:120]}")
-    except Exception as e:
-        print(f"  (no perf logs: {e})")
-
     # Check for error message before waiting for password
     body_text = driver.find_element(By.TAG_NAME, 'body').text
     if 'unknown error' in body_text.lower() or 'contact support' in body_text.lower():
         _save_debug(driver, 'mgm-email-error')
         print("  ⚠️ MGM showed error after email submit, retrying with fresh page...")
-
-        # Dump console logs for clues
-        try:
-            for log_entry in driver.get_log('browser')[-20:]:
-                print(f"  [console] {log_entry['level']}: {log_entry['message'][:200]}")
-        except Exception:
-            pass
-
         human_delay(3, 5)
 
         # Retry: go back and try again with longer delays
@@ -428,28 +385,19 @@ def save_mgm_trips(trips):
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
 def make_driver(visible=False):
-    options = uc.ChromeOptions()
+    from selenium.webdriver.chrome.service import Service
+    options = webdriver.ChromeOptions()
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--lang=en-US')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
     if visible:
         options.add_argument('--start-maximized')
-    # DO NOT use --headless — bot protection detects it.
-    # On CI, xvfb provides a virtual display instead.
-
-    # Enable performance logging so we can capture network responses
-    options.set_capability('goog:loggingPrefs', {'performance': 'ALL', 'browser': 'ALL'})
-
-    options.binary_location = '/usr/bin/google-chrome-stable'
-
-    chrome_ver = None
-    ver_str = os.environ.get('CHROME_VERSION', '')
-    if ver_str.isdigit():
-        chrome_ver = int(ver_str)
-        print(f"  Chrome version from env: {chrome_ver}")
-
-    if chrome_ver:
-        return uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
-    return uc.Chrome(options=options, use_subprocess=True)
+    # Run under xvfb on CI instead of --headless.
+    # MGM doesn't need undetected-chromedriver (which injects a console
+    # fingerprint that MGM's LogRocket detects, causing 403 on their
+    # identity API).
+    return webdriver.Chrome(options=options)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
