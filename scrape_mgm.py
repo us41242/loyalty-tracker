@@ -121,6 +121,20 @@ def parse_date(date_str):
         return f"{m.group(3)}-{months[m.group(1)]}-{m.group(2).zfill(2)}"
     return date_str
 
+# ── Debug helpers ────────────────────────────────────────────────────────────
+def _save_debug(driver, name):
+    """Save screenshot + page source for debugging."""
+    os.makedirs('debug', exist_ok=True)
+    try:
+        driver.save_screenshot(f'debug/{name}.png')
+    except Exception:
+        pass
+    try:
+        with open(f'debug/{name}.html', 'w') as f:
+            f.write(driver.page_source)
+    except Exception:
+        pass
+
 # ── Login ─────────────────────────────────────────────────────────────────────
 def mgm_login(driver):
     print("🔑 Logging in to MGM...")
@@ -134,29 +148,77 @@ def mgm_login(driver):
     driver.get('https://www.mgmresorts.com/')
     human_delay(3, 5)
     driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
-    human_delay(3, 6)
+    human_delay(5, 8)
 
+    _save_debug(driver, 'mgm-login-page')
+    print(f"  Login page URL: {driver.current_url}")
+    print(f"  Login page title: {driver.title}")
+
+    # Try multiple selectors for the email field
+    wait = WebDriverWait(driver, 20)
+    email_input = None
+    for selector in [
+        (By.ID, 'email'),
+        (By.CSS_SELECTOR, 'input[type="email"]'),
+        (By.CSS_SELECTOR, 'input[name="email"]'),
+        (By.CSS_SELECTOR, 'input[name="username"]'),
+        (By.CSS_SELECTOR, 'input[autocomplete="email"]'),
+    ]:
+        try:
+            email_input = wait.until(EC.presence_of_element_located(selector))
+            print(f"  Found email input via {selector}")
+            break
+        except TimeoutException:
+            continue
+
+    if not email_input:
+        # Last resort: find any visible text/email input
+        for inp in driver.find_elements(By.TAG_NAME, 'input'):
+            itype = inp.get_attribute('type') or ''
+            if itype in ('text', 'email') and inp.is_displayed():
+                email_input = inp
+                print(f"  Found email input via fallback (type={itype})")
+                break
+
+    if not email_input:
+        _save_debug(driver, 'mgm-no-email-field')
+        print("  ❌ Could not find email input field")
+        print(f"  Page text preview: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
+        raise Exception("MGM login failed: no email input found")
+
+    human_type(email_input, os.environ['MGM_EMAIL'])
+    human_delay(1, 2)
+
+    # Click next/submit after email
+    submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+    human_click(driver, submit_btn)
+    human_delay(3, 5)
+
+    # Wait for password field
+    pass_input = None
     try:
-        email_input = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.ID, 'email'))
-        )
-        human_type(email_input, os.environ['MGM_EMAIL'])
-        human_delay(1, 2)
-        next_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-        human_click(driver, next_btn)
-        human_delay(3, 5)
-        pass_input = WebDriverWait(driver, 10).until(
+        pass_input = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="password"]'))
         )
-        human_type(pass_input, os.environ['MGM_PASSWORD'])
-        human_delay(1, 2)
-        submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-        human_click(driver, submit_btn)
-        human_delay(5, 8)
-    except Exception as e:
-        print(f"  Login flow: {e}")
+    except TimeoutException:
+        _save_debug(driver, 'mgm-no-password-field')
+        print(f"  ❌ No password field appeared. URL: {driver.current_url}")
+        print(f"  Page text preview: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
+        raise Exception("MGM login failed: no password field")
 
+    human_type(pass_input, os.environ['MGM_PASSWORD'])
+    human_delay(1, 2)
+    submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+    human_click(driver, submit_btn)
+    human_delay(5, 8)
+
+    _save_debug(driver, 'mgm-after-login')
     print(f"  URL after login: {driver.current_url}")
+
+    if '/identity' in driver.current_url:
+        print("  ⚠️ Still on login page — login may have failed")
+        print(f"  Page text: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
+
     save_cookies(driver, 'mgm')
 
 # ── Scraping ──────────────────────────────────────────────────────────────────
