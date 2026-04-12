@@ -16,7 +16,7 @@ import random
 import json
 from datetime import datetime, date, timezone, timedelta
 
-from selenium import webdriver
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -254,28 +254,25 @@ def save_rio_offers(offers):
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
 def make_driver(visible=False):
+    options = uc.ChromeOptions()
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--lang=en-US')
     if visible:
-        # Local debug: use undetected_chromedriver to bypass bot detection
-        import undetected_chromedriver as uc
-        options = uc.ChromeOptions()
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('--lang=en-US')
         options.add_argument('--start-maximized')
-        # DO NOT use --headless — detected by bot protection
-        return uc.Chrome(options=options, use_subprocess=True)
-    else:
-        # CI / headless: use webdriver-manager for reliable Chrome+ChromeDriver matching
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
-        options = webdriver.ChromeOptions()
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--headless')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('--lang=en-US')
-        service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=options)
+    # DO NOT use --headless — bot protection detects it.
+    # On CI, xvfb provides a virtual display instead.
+
+    options.binary_location = '/usr/bin/google-chrome-stable'
+
+    chrome_ver = None
+    ver_str = os.environ.get('CHROME_VERSION', '')
+    if ver_str.isdigit():
+        chrome_ver = int(ver_str)
+        print(f"  Chrome version from env: {chrome_ver}")
+
+    if chrome_ver:
+        return uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
+    return uc.Chrome(options=options, use_subprocess=True)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
