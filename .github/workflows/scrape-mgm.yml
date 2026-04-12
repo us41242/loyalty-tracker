@@ -22,16 +22,13 @@ jobs:
       - name: Install dependencies
         run: pip install selenium webdriver-manager supabase python-dotenv
 
-      - name: Install xvfb
-        run: sudo apt-get install -y xvfb
-
       - name: Run MGM scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           MGM_EMAIL: ${{ secrets.MGM_EMAIL }}
           MGM_PASSWORD: ${{ secrets.MGM_PASSWORD }}
-        run: xvfb-run --auto-servernum python scrape_mgm.py
+        run: python scrape_mgm.py
 
       - name: Upload debug screenshots
         if: always()

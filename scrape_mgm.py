@@ -165,145 +165,45 @@ def mgm_login(driver):
         else:
             print("  🍪 Cookies expired, doing full login...")
 
-    # Navigate to homepage first like a real user
     driver.get('https://www.mgmresorts.com/')
-    human_delay(4, 7)
-    _dismiss_cookie_banner(driver)
-    _random_scroll(driver)
-    human_delay(2, 4)
-
-    # Click "Sign In" link from the homepage instead of going directly to /identity/
-    sign_in_clicked = False
-    for el in driver.find_elements(By.CSS_SELECTOR, 'a, button, [role="button"]'):
-        try:
-            txt = el.text.strip().lower()
-            href = (el.get_attribute('href') or '').lower()
-            if ('sign in' in txt or 'log in' in txt or '/identity' in href) and el.is_displayed():
-                print(f"  Clicking '{el.text.strip()}' link...")
-                human_click(driver, el)
-                sign_in_clicked = True
-                break
-        except Exception:
-            continue
-
-    if not sign_in_clicked:
-        print("  Could not find Sign In link, navigating directly...")
-        driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
-
-    human_delay(5, 8)
+    human_delay(3, 5)
+    driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
+    human_delay(3, 6)
 
     _save_debug(driver, 'mgm-login-page')
     print(f"  Login page URL: {driver.current_url}")
-    print(f"  Login page title: {driver.title}")
 
-    # Try multiple selectors for the email field
-    wait = WebDriverWait(driver, 20)
-    email_input = None
-    for selector in [
-        (By.ID, 'email'),
-        (By.CSS_SELECTOR, 'input[type="email"]'),
-        (By.CSS_SELECTOR, 'input[name="email"]'),
-        (By.CSS_SELECTOR, 'input[name="username"]'),
-        (By.CSS_SELECTOR, 'input[autocomplete="email"]'),
-    ]:
-        try:
-            email_input = wait.until(EC.presence_of_element_located(selector))
-            print(f"  Found email input via {selector}")
-            break
-        except TimeoutException:
-            continue
-
-    if not email_input:
-        for inp in driver.find_elements(By.TAG_NAME, 'input'):
-            itype = inp.get_attribute('type') or ''
-            if itype in ('text', 'email') and inp.is_displayed():
-                email_input = inp
-                print(f"  Found email input via fallback (type={itype})")
-                break
-
-    if not email_input:
-        _save_debug(driver, 'mgm-no-email-field')
-        print("  ❌ Could not find email input field")
-        print(f"  Page text preview: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
-        raise Exception("MGM login failed: no email input found")
-
-    # Click the field, pause, then type slowly
-    email_input.click()
-    human_delay(0.5, 1.0)
-    human_type(email_input, os.environ['MGM_EMAIL'])
-    human_delay(1.5, 3)
-
-    _save_debug(driver, 'mgm-email-entered')
-
-    # Click next/submit after email
-    submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-    human_click(driver, submit_btn)
-    human_delay(4, 7)
-
-    # Check for error message before waiting for password
-    body_text = driver.find_element(By.TAG_NAME, 'body').text
-    if 'unknown error' in body_text.lower() or 'contact support' in body_text.lower():
-        _save_debug(driver, 'mgm-email-error')
-        print("  ⚠️ MGM showed error after email submit, retrying with fresh page...")
-        human_delay(3, 5)
-
-        # Retry: go back and try again with longer delays
-        driver.get('https://www.mgmresorts.com/')
-        human_delay(5, 8)
-        _dismiss_cookie_banner(driver)
-        _random_scroll(driver)
-        human_delay(3, 5)
-
-        # Try clicking Sign In from homepage again
-        for el in driver.find_elements(By.CSS_SELECTOR, 'a, button, [role="button"]'):
-            try:
-                txt = el.text.strip().lower()
-                if ('sign in' in txt or 'log in' in txt) and el.is_displayed():
-                    human_click(driver, el)
-                    break
-            except Exception:
-                continue
-        else:
-            driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
-
-        human_delay(6, 10)
-
-        email_input = WebDriverWait(driver, 20).until(
+    try:
+        email_input = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.ID, 'email'))
         )
-        email_input.click()
-        human_delay(1, 2)
         human_type(email_input, os.environ['MGM_EMAIL'])
-        human_delay(2, 4)
+        human_delay(1, 2)
+        next_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+        human_click(driver, next_btn)
+        human_delay(3, 5)
+
+        # Check for error before waiting for password
+        body_text = driver.find_element(By.TAG_NAME, 'body').text
+        if 'unknown error' in body_text.lower():
+            _save_debug(driver, 'mgm-email-error')
+            print(f"  ⚠️ MGM error after email submit")
+            print(f"  Page text: {body_text[:300]}")
+
+        pass_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="password"]'))
+        )
+        human_type(pass_input, os.environ['MGM_PASSWORD'])
+        human_delay(1, 2)
         submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
         human_click(driver, submit_btn)
         human_delay(5, 8)
-
-    # Wait for password field
-    pass_input = None
-    try:
-        pass_input = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="password"]'))
-        )
-    except TimeoutException:
-        _save_debug(driver, 'mgm-no-password-field')
-        print(f"  ❌ No password field appeared. URL: {driver.current_url}")
-        print(f"  Page text preview: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
-        raise Exception("MGM login failed: no password field")
-
-    human_type(pass_input, os.environ['MGM_PASSWORD'])
-    human_delay(1.5, 3)
-    submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-    human_click(driver, submit_btn)
-    human_delay(5, 8)
-
-    _save_debug(driver, 'mgm-after-login')
-    print(f"  URL after login: {driver.current_url}")
-
-    if '/identity' in driver.current_url:
-        print("  ⚠️ Still on login page — login may have failed")
+    except Exception as e:
+        _save_debug(driver, 'mgm-login-failed')
+        print(f"  Login flow error: {e}")
         print(f"  Page text: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
 
+    print(f"  URL after login: {driver.current_url}")
     save_cookies(driver, 'mgm')
 
 # ── Scraping ──────────────────────────────────────────────────────────────────
@@ -385,19 +285,30 @@ def save_mgm_trips(trips):
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
 def make_driver(visible=False):
-    from selenium.webdriver.chrome.service import Service
-    options = webdriver.ChromeOptions()
-    options.add_argument('--window-size=1920,1080')
-    options.add_argument('--lang=en-US')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
     if visible:
+        # Local debug: use undetected_chromedriver to bypass bot detection
+        import undetected_chromedriver as uc
+        options = uc.ChromeOptions()
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--lang=en-US')
         options.add_argument('--start-maximized')
-    # Run under xvfb on CI instead of --headless.
-    # MGM doesn't need undetected-chromedriver (which injects a console
-    # fingerprint that MGM's LogRocket detects, causing 403 on their
-    # identity API).
-    return webdriver.Chrome(options=options)
+        return uc.Chrome(options=options, use_subprocess=True)
+    else:
+        # CI: use plain selenium + webdriver-manager + headless.
+        # MGM does NOT need undetected-chromedriver — uc injects a console
+        # fingerprint ("undetected chromedriver 1337!") that MGM's LogRocket
+        # captures, causing their identity API to return 403.
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        options = webdriver.ChromeOptions()
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--headless')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--lang=en-US')
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=options)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
