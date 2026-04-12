@@ -136,6 +136,26 @@ def _save_debug(driver, name):
         pass
 
 # ── Login ─────────────────────────────────────────────────────────────────────
+def _dismiss_cookie_banner(driver):
+    """Dismiss cookie consent banner if present."""
+    try:
+        for btn in driver.find_elements(By.CSS_SELECTOR, 'button, a'):
+            txt = btn.text.strip().lower()
+            if txt in ('accept all', 'accept', 'accept cookies', 'i accept', 'got it', 'ok') and btn.is_displayed():
+                human_click(driver, btn)
+                print("  🍪 Dismissed cookie banner")
+                human_delay(1, 2)
+                return
+    except Exception:
+        pass
+
+def _random_scroll(driver):
+    """Scroll around a bit like a human would."""
+    driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(100, 300))
+    human_delay(0.5, 1.5)
+    driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(-200, -50))
+    human_delay(0.5, 1)
+
 def mgm_login(driver):
     print("🔑 Logging in to MGM...")
     if load_cookies(driver, 'mgm', 'www.mgmresorts.com'):
@@ -145,9 +165,31 @@ def mgm_login(driver):
         else:
             print("  🍪 Cookies expired, doing full login...")
 
+    # Navigate to homepage first like a real user
     driver.get('https://www.mgmresorts.com/')
-    human_delay(3, 5)
-    driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
+    human_delay(4, 7)
+    _dismiss_cookie_banner(driver)
+    _random_scroll(driver)
+    human_delay(2, 4)
+
+    # Click "Sign In" link from the homepage instead of going directly to /identity/
+    sign_in_clicked = False
+    for el in driver.find_elements(By.CSS_SELECTOR, 'a, button, [role="button"]'):
+        try:
+            txt = el.text.strip().lower()
+            href = (el.get_attribute('href') or '').lower()
+            if ('sign in' in txt or 'log in' in txt or '/identity' in href) and el.is_displayed():
+                print(f"  Clicking '{el.text.strip()}' link...")
+                human_click(driver, el)
+                sign_in_clicked = True
+                break
+        except Exception:
+            continue
+
+    if not sign_in_clicked:
+        print("  Could not find Sign In link, navigating directly...")
+        driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
+
     human_delay(5, 8)
 
     _save_debug(driver, 'mgm-login-page')
@@ -172,7 +214,6 @@ def mgm_login(driver):
             continue
 
     if not email_input:
-        # Last resort: find any visible text/email input
         for inp in driver.find_elements(By.TAG_NAME, 'input'):
             itype = inp.get_attribute('type') or ''
             if itype in ('text', 'email') and inp.is_displayed():
@@ -186,13 +227,45 @@ def mgm_login(driver):
         print(f"  Page text preview: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
         raise Exception("MGM login failed: no email input found")
 
+    # Click the field, pause, then type slowly
+    email_input.click()
+    human_delay(0.5, 1.0)
     human_type(email_input, os.environ['MGM_EMAIL'])
-    human_delay(1, 2)
+    human_delay(1.5, 3)
+
+    _save_debug(driver, 'mgm-email-entered')
 
     # Click next/submit after email
     submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
     human_click(driver, submit_btn)
-    human_delay(3, 5)
+    human_delay(4, 7)
+
+    # Check for error message before waiting for password
+    body_text = driver.find_element(By.TAG_NAME, 'body').text
+    if 'unknown error' in body_text.lower() or 'contact support' in body_text.lower():
+        _save_debug(driver, 'mgm-email-error')
+        print("  ⚠️ MGM showed error after email submit, retrying with fresh page...")
+        human_delay(3, 5)
+
+        # Retry: go back and try again
+        driver.get('https://www.mgmresorts.com/')
+        human_delay(4, 6)
+        _dismiss_cookie_banner(driver)
+        _random_scroll(driver)
+        human_delay(2, 3)
+        driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
+        human_delay(5, 8)
+
+        email_input = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.ID, 'email'))
+        )
+        email_input.click()
+        human_delay(0.5, 1.0)
+        human_type(email_input, os.environ['MGM_EMAIL'])
+        human_delay(2, 4)
+        submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+        human_click(driver, submit_btn)
+        human_delay(4, 7)
 
     # Wait for password field
     pass_input = None
@@ -207,7 +280,7 @@ def mgm_login(driver):
         raise Exception("MGM login failed: no password field")
 
     human_type(pass_input, os.environ['MGM_PASSWORD'])
-    human_delay(1, 2)
+    human_delay(1.5, 3)
     submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
     human_click(driver, submit_btn)
     human_delay(5, 8)
