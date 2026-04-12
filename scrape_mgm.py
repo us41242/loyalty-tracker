@@ -165,6 +165,22 @@ def mgm_login(driver):
         else:
             print("  🍪 Cookies expired, doing full login...")
 
+    # Suppress the "undetected chromedriver 1337!" console message that
+    # gets picked up by LogRocket and triggers MGM's bot detection.
+    try:
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': '''
+                const _origLog = console.log;
+                console.log = function(...args) {
+                    if (args.length === 1 && typeof args[0] === 'string' && args[0].includes('1337'))
+                        return;
+                    return _origLog.apply(console, args);
+                };
+            '''
+        })
+    except Exception as e:
+        print(f"  (could not inject console filter: {e})")
+
     # Navigate to homepage first like a real user
     driver.get('https://www.mgmresorts.com/')
     human_delay(4, 7)
