@@ -227,6 +227,12 @@ def mgm_login(driver):
         print(f"  Page text preview: {driver.find_element(By.TAG_NAME, 'body').text[:500]}")
         raise Exception("MGM login failed: no email input found")
 
+    # Enable network logging to capture the API response
+    try:
+        driver.execute_cdp_cmd('Network.enable', {})
+    except Exception:
+        pass
+
     # Click the field, pause, then type slowly
     email_input.click()
     human_delay(0.5, 1.0)
@@ -240,32 +246,65 @@ def mgm_login(driver):
     human_click(driver, submit_btn)
     human_delay(4, 7)
 
+    # Capture network logs to see what API returned
+    try:
+        perf_logs = driver.get_log('performance')
+        for entry in perf_logs[-30:]:
+            msg = json.loads(entry['message'])['message']
+            if msg.get('method') == 'Network.responseReceived':
+                url = msg['params']['response']['url']
+                status = msg['params']['response']['status']
+                if 'identity' in url or 'auth' in url or 'login' in url or status >= 400:
+                    print(f"  🌐 {status} {url[:120]}")
+    except Exception as e:
+        print(f"  (no perf logs: {e})")
+
     # Check for error message before waiting for password
     body_text = driver.find_element(By.TAG_NAME, 'body').text
     if 'unknown error' in body_text.lower() or 'contact support' in body_text.lower():
         _save_debug(driver, 'mgm-email-error')
         print("  ⚠️ MGM showed error after email submit, retrying with fresh page...")
+
+        # Dump console logs for clues
+        try:
+            for log_entry in driver.get_log('browser')[-20:]:
+                print(f"  [console] {log_entry['level']}: {log_entry['message'][:200]}")
+        except Exception:
+            pass
+
         human_delay(3, 5)
 
-        # Retry: go back and try again
+        # Retry: go back and try again with longer delays
         driver.get('https://www.mgmresorts.com/')
-        human_delay(4, 6)
+        human_delay(5, 8)
         _dismiss_cookie_banner(driver)
         _random_scroll(driver)
-        human_delay(2, 3)
-        driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
-        human_delay(5, 8)
+        human_delay(3, 5)
+
+        # Try clicking Sign In from homepage again
+        for el in driver.find_elements(By.CSS_SELECTOR, 'a, button, [role="button"]'):
+            try:
+                txt = el.text.strip().lower()
+                if ('sign in' in txt or 'log in' in txt) and el.is_displayed():
+                    human_click(driver, el)
+                    break
+            except Exception:
+                continue
+        else:
+            driver.get('https://www.mgmresorts.com/identity/?client_id=mgm_app_web&redirect_uri=https://www.mgmresorts.com/rewards/&scopes=')
+
+        human_delay(6, 10)
 
         email_input = WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.ID, 'email'))
         )
         email_input.click()
-        human_delay(0.5, 1.0)
+        human_delay(1, 2)
         human_type(email_input, os.environ['MGM_EMAIL'])
         human_delay(2, 4)
         submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
         human_click(driver, submit_btn)
-        human_delay(4, 7)
+        human_delay(5, 8)
 
     # Wait for password field
     pass_input = None
@@ -380,6 +419,9 @@ def make_driver(visible=False):
         options.add_argument('--start-maximized')
     # DO NOT use --headless — bot protection detects it.
     # On CI, xvfb provides a virtual display instead.
+
+    # Enable performance logging so we can capture network responses
+    options.set_capability('goog:loggingPrefs', {'performance': 'ALL', 'browser': 'ALL'})
 
     options.binary_location = '/usr/bin/google-chrome-stable'
 
