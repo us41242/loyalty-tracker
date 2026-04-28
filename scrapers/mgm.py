@@ -22,6 +22,7 @@ from .browser import (
     random_delay,
 )
 from .db import parse_date, supabase
+from .session_cookies import load_cookies, save_cookies
 
 
 def scrape_mgm(browser: BrowserContext) -> None:
@@ -29,9 +30,15 @@ def scrape_mgm(browser: BrowserContext) -> None:
     print("  MGM REWARDS SCRAPER")
     print("═══════════════════════════════════════\n")
 
+    # Pull saved cookies BEFORE opening any page so they're set for the first navigation.
+    load_cookies(browser, "mgm")
+
     page = new_page(browser)
     try:
         _login(page)
+        # Save the (possibly refreshed) cookies after a successful login.
+        save_cookies(browser, "mgm")
+
         rewards = _scrape_rewards(page)
         trips = _scrape_trips(page)
         _save_snapshot(rewards)
