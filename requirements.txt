@@ -1,0 +1,5 @@
+camoufox[geoip]>=0.4.11
+playwright>=1.47
+supabase>=2.7
+python-dotenv>=1.0
+beautifulsoup4>=4.12
