@@ -110,8 +110,17 @@ def _login(page: Page) -> None:
     else:
         print("  ⚠️ No email input found")
 
+    # Wait for the post-login redirect to actually settle before judging
+    # whether login succeeded — clicking Sign In returns control before the
+    # SPA route changes, so a naive URL check fires falsely.
+    try:
+        page.wait_for_url(re.compile(r"/rewards"), timeout=15000)
+    except Exception:
+        pass
+
     print(f"  URL after login: {page.url}")
-    if "/identity" in page.url:
+    text = page.evaluate("() => document.body.innerText") or ""
+    if "/identity" in page.url and "Sign Out" not in text:
         debug_snapshot(page, "mgm-login-failed")
 
 
