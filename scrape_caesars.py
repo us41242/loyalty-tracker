@@ -633,78 +633,32 @@ def scrape_caesars_offers(driver):
     return unique_offers
 
 def scrape_caesars_great_gift(driver):
+    """Read the Great Gift balance directly from the promotions page.
+
+    Caesars now embeds the balance as <span class="experience-balance-amount-hotfix">N</span>
+    on /myrewards/promotions/ggwu-points — no Shop Now click-through, no
+    cross-window switch, no 2FA trigger.
+    """
     print("🎄 Scraping Great Gift...")
     try:
         driver.get('https://www.caesars.com/myrewards/promotions/ggwu-points')
         human_delay(4, 6)
         wait = WebDriverWait(driver, 15)
-        handles_before = set(driver.window_handles)
-        shop_clicked = False
         try:
-            shop_el = wait.until(EC.element_to_be_clickable(
-                (By.XPATH, '//*[@id="uuid-5d898d29-470d-4d8f-8e91-ef838ad0cf2c"]/div/div/div/a')
+            el = wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'span.experience-balance-amount-hotfix')
             ))
-            human_click(driver, shop_el)
-            shop_clicked = True
         except TimeoutException:
-            print("  XPath not found, trying text/link search...")
-        if not shop_clicked:
-            for link in driver.find_elements(By.TAG_NAME, 'a'):
-                try:
-                    if ('Shop Now' in link.text or 'SHOP NOW' in link.text) and link.is_displayed():
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link)
-                        human_delay(0.5, 1)
-                        human_click(driver, link)
-                        shop_clicked = True
-                        break
-                except Exception:
-                    continue
-        if not shop_clicked:
-            driver.execute_script("""
-                var links = document.querySelectorAll('a');
-                for (var i = 0; i < links.length; i++) {
-                    if (links[i].textContent.trim().toUpperCase().includes('SHOP NOW')) {
-                        links[i].click(); break;
-                    }
-                }
-            """)
-        human_delay(5, 8)
+            print("  ⚠️ Great Gift balance span not found within 15s")
+            return None
 
-        new_handles = set(driver.window_handles) - handles_before
-        if new_handles:
-            driver.switch_to.window(new_handles.pop())
-            human_delay(2, 3)
-
-        for handle in driver.window_handles:
-            driver.switch_to.window(handle)
-            if '/verification/step-up' in driver.current_url:
-                handle_caesars_2fa(driver)
-                human_delay(5, 8)
-                break
-
-        human_delay(3, 5)
-        for handle in driver.window_handles:
-            driver.switch_to.window(handle)
-            if 'incentiveusa' in driver.current_url or 'propelhq' in driver.current_url:
-                break
-
-        text = driver.find_element(By.TAG_NAME, 'body').text
-        m = re.search(r'Great Gift Points Balance:\s*([\d,]+)', text, re.I)
-        points = int(m.group(1).replace(',', '')) if m else None
-        if points is None:
-            print(f"  Page text preview: {text[:300]}")
+        raw = (el.text or '').strip().replace(',', '')
+        points = int(raw) if raw.isdigit() else None
         print(f"  ✅ Great Gift Points: {points}")
-
-        if len(driver.window_handles) > 1:
-            driver.close()
-            driver.switch_to.window(driver.window_handles[0])
-
         return points
     except Exception as e:
         print(f"  ⚠️ Could not scrape Great Gift: {e}")
         import traceback; traceback.print_exc()
-        if len(driver.window_handles) > 1:
-            driver.switch_to.window(driver.window_handles[0])
         return None
 
 # ── Save to Supabase ──────────────────────────────────────────────────────────
