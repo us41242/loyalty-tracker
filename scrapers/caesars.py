@@ -200,11 +200,21 @@ def _scrape_rewards_home(page: Page) -> dict:
     human_navigate(page, "https://www.caesars.com/rewards/home")
     random_delay(2000, 4000)
 
-    # Combine page innerText (for dates etc.) with a space-joined text walk of
-    # the user-detail dropdown. The dropdown holds the real lowercase value
-    # like "4,663 reward credits" but each token sits in a separate <div>, so
-    # textContent smushes it ("4,663reward credits"). Walking text nodes and
-    # joining with spaces preserves word boundaries that the regex needs.
+    # The real reward-credits value is React-lazy-mounted: it ONLY appears in
+    # the DOM after the user-detail dropdown is opened. Click the avatar
+    # dropdown button first; without this, "4,663 reward credits" never
+    # exists in the page at all.
+    page.evaluate("""() => {
+        const btn = document.querySelector('[data-testid="my-rewards-dropdown-open-button"]');
+        if (btn) btn.click();
+    }""")
+    random_delay(1200, 2000)
+
+    # Then walk the dropdown's text nodes with explicit space joining. Plain
+    # textContent smushes adjacent <div>s ("4,663reward credits"); innerText
+    # skips elements that CSS hides. Walking SHOW_TEXT nodes via TreeWalker
+    # and joining with spaces gives us the same word-boundary structure that
+    # BeautifulSoup's get_text(' ') produced in our offline test.
     text: str = page.evaluate("""() => {
         function spaceJoinText(el) {
             if (!el) return '';
