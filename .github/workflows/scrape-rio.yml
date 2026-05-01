@@ -2,8 +2,11 @@ name: Scrape Rio
 
 on:
   schedule:
-    # 12:00 AM Pacific = 07:00 UTC (PDT). Drifts 1h in PST.
-    - cron: '0 7 * * *'
+    # Pacific Time midnight, year-round. GitHub cron is UTC-only with no DST,
+    # so we register both UTC times and skip whichever doesn't match the
+    # current Pacific offset.
+    - cron: '0 7 * * *'  # midnight PT in PDT (UTC-7) — Mar–Nov
+    - cron: '0 8 * * *'  # midnight PT in PST (UTC-8) — Nov–Mar
   workflow_dispatch:
 
 jobs:
@@ -12,27 +15,51 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Skip if not the active DST cron
+        id: dst
+        run: |
+          PT_OFFSET=$(TZ=America/Los_Angeles date +%z)
+          SCHEDULE="${{ github.event.schedule }}"
+          case "$SCHEDULE" in
+            "0 7 * * *") REQ="-0700" ;;   # PDT cron
+            "0 8 * * *") REQ="-0800" ;;   # PST cron
+            *)           REQ="" ;;         # workflow_dispatch — always run
+          esac
+          if [ -z "$REQ" ] || [ "$PT_OFFSET" = "$REQ" ]; then
+            echo "Pacific offset $PT_OFFSET matches cron $SCHEDULE — running."
+            echo "run=true" >> $GITHUB_OUTPUT
+          else
+            echo "Pacific offset is $PT_OFFSET, cron $SCHEDULE expects $REQ — skipping."
+            echo "run=false" >> $GITHUB_OUTPUT
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.dst.outputs.run == 'true'
 
       - name: Setup Python
+        if: steps.dst.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Install Python deps
+        if: steps.dst.outputs.run == 'true'
         run: pip install -r requirements.txt
 
       - name: Cache camoufox browser
+        if: steps.dst.outputs.run == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/camoufox
           key: camoufox-${{ runner.os }}-v1
 
       - name: Fetch camoufox (no-op if cached)
+        if: steps.dst.outputs.run == 'true'
         run: python -m camoufox fetch
 
       - name: Run Rio scraper
+        if: steps.dst.outputs.run == 'true'
         env:
           CI: 'true'
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -42,7 +69,7 @@ jobs:
         run: python run.py rio --headless
 
       - name: Upload debug screenshots
-        if: always()
+        if: always() && steps.dst.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: debug-rio
