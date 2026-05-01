@@ -200,36 +200,20 @@ def _scrape_rewards_home(page: Page) -> dict:
     human_navigate(page, "https://www.caesars.com/rewards/home")
     random_delay(2000, 4000)
 
-    # The real reward-credits value is React-lazy-mounted: it ONLY appears in
-    # the DOM after the user-detail dropdown is opened. Click the avatar
-    # dropdown button first; without this, "4,663 reward credits" never
-    # exists in the page at all.
-    page.evaluate("""() => {
-        const btn = document.querySelector('[data-testid="my-rewards-dropdown-open-button"]');
-        if (btn) btn.click();
-    }""")
-    random_delay(1200, 2000)
-
-    # Then walk the dropdown's text nodes with explicit space joining. Plain
-    # textContent smushes adjacent <div>s ("4,663reward credits"); innerText
-    # skips elements that CSS hides. Walking SHOW_TEXT nodes via TreeWalker
-    # and joining with spaces gives us the same word-boundary structure that
-    # BeautifulSoup's get_text(' ') produced in our offline test.
+    # Walk every text node in the body and join with spaces. This is what
+    # BeautifulSoup's get_text(' ') does — and unlike innerText, it captures
+    # CSS-hidden text. The real "4,663 reward credits" lives 13+ levels deep
+    # in a marketing widget with no useful testid, but our regex finds it
+    # cleanly once we have the text with proper word boundaries.
     text: str = page.evaluate("""() => {
-        function spaceJoinText(el) {
-            if (!el) return '';
-            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-            const parts = [];
-            let node;
-            while ((node = walker.nextNode())) {
-                const t = node.nodeValue.trim();
-                if (t) parts.push(t);
-            }
-            return parts.join(' ');
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        const parts = [];
+        let node;
+        while ((node = walker.nextNode())) {
+            const t = node.nodeValue.trim();
+            if (t) parts.push(t);
         }
-        const body = document.body.innerText || '';
-        const dd = document.querySelector('[data-testid="my-rewards-user-detail-dropdown"]');
-        return body + '\\n' + spaceJoinText(dd);
+        return parts.join(' ');
     }""")
 
     def grab(pat, group=1, flags=re.I):
