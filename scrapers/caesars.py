@@ -199,6 +199,16 @@ def _scrape_rewards_home(page: Page) -> dict:
     print("📊 Scraping rewards home...")
     human_navigate(page, "https://www.caesars.com/rewards/home")
     random_delay(2000, 4000)
+
+    # The real (non-animated) reward-credits value lives inside the user-detail
+    # dropdown (the avatar/profile menu at the top right). It's collapsed by
+    # default, which makes its text invisible to innerText. Click it open first.
+    page.evaluate("""() => {
+        const btn = document.querySelector('[data-testid="my-rewards-dropdown-open-button"]');
+        if (btn) btn.click();
+    }""")
+    random_delay(800, 1500)
+
     text: str = page.evaluate("() => document.body.innerText")
 
     def grab(pat, group=1, flags=re.I):
