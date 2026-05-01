@@ -4,14 +4,7 @@ Usage:
     python run.py                          # all scrapers, visible window
     python run.py rio                      # just rio
     python run.py mgm caesars              # multiple
-    python run.py --headless               # no visible window (after first login)
-
-Caesars dev iteration:
-    python run.py caesars --skip-login --offers-only --dump-html
-        # Assumes firefox-profile/ is already logged in. Skips login + 2FA,
-        # skips reservations + great-gift, scrapes only offers, and saves
-        # debug/offers.html. Then iterate offline:
-    python -m scrapers.parse_offers debug/offers.html
+    python run.py --headless               # no visible window
 """
 
 import argparse
@@ -39,10 +32,8 @@ def main() -> int:
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--skip-login", action="store_true",
                     help="Caesars only: skip login + 2FA, assume profile is signed in.")
-    ap.add_argument("--offers-only", action="store_true",
-                    help="Caesars only: skip rewards/reservations/great-gift.")
     ap.add_argument("--dump-html", action="store_true",
-                    help="Caesars only: save offers page HTML to debug/offers.html.")
+                    help="Caesars only: save offers page HTML to debug/offers-*.html.")
     args = ap.parse_args()
     targets = args.which or list(SCRAPERS)
     unknown = [n for n in targets if n not in SCRAPERS]
@@ -56,7 +47,6 @@ def main() -> int:
 
     caesars_kwargs = {
         "skip_login": args.skip_login,
-        "offers_only": args.offers_only,
         "dump_html": args.dump_html,
     }
 

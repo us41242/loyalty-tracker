@@ -36,7 +36,6 @@ def scrape_caesars(
     *,
     skip_login: bool = False,
     dump_html: bool = False,
-    offers_only: bool = False,
 ) -> None:
     print("\n═══════════════════════════════════════")
     print("  CAESARS REWARDS SCRAPER")
@@ -48,21 +47,14 @@ def scrape_caesars(
             _login(page)
             _handle_2fa(page)  # no-op unless the URL is the 2FA step-up page
 
-        if not offers_only:
-            rewards = _scrape_rewards_home(page)
-            past_res = _scrape_reservations(page, "past")
-            current_res = _scrape_reservations(page, "current")
-
+        rewards = _scrape_rewards_home(page)
+        past_res = _scrape_reservations(page, "past")
+        current_res = _scrape_reservations(page, "current")
         offers = _scrape_offers(page, dump_html=dump_html)
-        # Great Gift balance now renders inline on the offers page — no extra
-        # navigation, no 2FA trigger.
-        great_gift = _scrape_great_gift_inline(page)
+        rewards["great_gift_points"] = _scrape_great_gift(page)
 
-        if not offers_only:
-            rewards["great_gift_points"] = great_gift
-            _save_snapshot(rewards)
-            _save_reservations(past_res + current_res)
-
+        _save_snapshot(rewards)
+        _save_reservations(past_res + current_res)
         _save_offers(offers)
         print("\n✅ Caesars scrape complete!\n")
     except Exception as e:
@@ -196,6 +188,14 @@ def _handle_2fa(page: Page) -> None:
 
 # ── Rewards Home ────────────────────────────────────────────────────────────
 def _scrape_rewards_home(page: Page) -> dict:
+    """Pull tier + credits from /rewards/home.
+
+    The page contains a digit-rolling animation that reads as `9 8 7 6 5 4 3 2 1 0
+    Reward Credits` — a case-insensitive regex matches the trailing `0` instead
+    of the real balance. The actual value renders nearby as lowercase
+    `4,663 reward credits`, so we match THAT pattern (case-sensitive lowercase)
+    for reward_credits.
+    """
     print("📊 Scraping rewards home...")
     human_navigate(page, "https://www.caesars.com/rewards/home")
     random_delay(2000, 4000)
@@ -205,16 +205,17 @@ def _scrape_rewards_home(page: Page) -> dict:
         m = re.search(pat, text, flags)
         return m.group(group) if m else None
 
-    def grab_int(pat):
-        v = grab(pat)
+    def grab_int(pat, flags=re.I):
+        v = grab(pat, flags=flags)
         return int(v.replace(",", "")) if v else None
 
     data = {
-        "reward_credits": grab_int(r"([\d,]+)\s*REWARD CREDITS"),
-        "tier_credits": grab_int(r"([\d,]+)\s*TIER CREDITS"),
+        # Case-sensitive lowercase: skips the digit-rolling animation.
+        "reward_credits": grab_int(r"([\d,]+)\s+reward credits\b", flags=0),
+        "tier_credits": grab_int(r"([\d,]+)\s+TIER CREDITS\b"),
         "tier_status": grab(r"(SEVEN STARS|DIAMOND ELITE|DIAMOND PLUS|DIAMOND|PLATINUM|GOLD)"),
-        "tier_next": grab(r"[\d,]+\s*to\s+(Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
-        "tier_credits_needed": grab_int(r"([\d,]+)\s*to\s+(?:Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
+        "tier_next": grab(r"[\d,]+\s+to\s+(Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
+        "tier_credits_needed": grab_int(r"([\d,]+)\s+to\s+(?:Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
         "last_earned_date": parse_date(grab(r"Last credits earned:\s*(\d{2}/\d{2}/\d{4})")),
         "credits_expire_date": parse_date(grab(r"Earn more Reward Credits before\s*(\d{2}/\d{2}/\d{4})")),
     }
@@ -536,30 +537,25 @@ def _scrape_offers(page: Page, *, dump_html: bool = False) -> list[dict]:
     return all_offers
 
 
-def parse_offers_text(text: str) -> list[dict]:
-    """Legacy text-mode parser. The current scraper extracts directly from
-    the DOM via stable data-testid selectors, so this function is unused but
-    kept here so anything that still imports it resolves."""
-    return []
-
-
-# ── Great Gift (inline on offers page, no 2FA) ──────────────────────────────
-def _scrape_great_gift_inline(page: Page) -> int | None:
-    """The promotions page now renders the balance directly — no click-through.
-
-    Reads the value from <span class="experience-balance-amount-hotfix">.
-    """
+# ── Great Gift Wrap Up balance ──────────────────────────────────────────────
+def _scrape_great_gift(page: Page) -> int | None:
+    """Read the GGWU balance from the dedicated promotions page.
+    Caesars renders the value as <span class="experience-balance-amount-hotfix">."""
+    print("🎄 Scraping Great Gift Wrap Up...")
     try:
-        el = page.query_selector("span.experience-balance-amount-hotfix")
-        if not el:
-            print("  ⚠️ Great Gift balance span not found on page")
+        human_navigate(page, "https://www.caesars.com/myrewards/promotions/ggwu-points")
+        try:
+            page.wait_for_selector("span.experience-balance-amount-hotfix", timeout=15000)
+        except Exception:
+            print("  ⚠️ GGWU balance span not found within 15s")
+            debug_snapshot(page, "caesars-great-gift")
             return None
-        raw = (el.inner_text() or "").strip().replace(",", "")
+        raw = (page.locator("span.experience-balance-amount-hotfix").first.inner_text() or "").strip().replace(",", "")
         pts = int(raw) if raw.isdigit() else None
-        print(f"  🎁 Great Gift Points: {pts}")
+        print(f"  🎁 GGWU Points: {pts}")
         return pts
     except Exception as e:
-        print(f"  ⚠️ Could not read Great Gift balance: {e}")
+        print(f"  ⚠️ Could not read GGWU balance: {e}")
         return None
 
 
