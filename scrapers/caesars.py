@@ -200,16 +200,27 @@ def _scrape_rewards_home(page: Page) -> dict:
     human_navigate(page, "https://www.caesars.com/rewards/home")
     random_delay(2000, 4000)
 
-    # The real (non-animated) reward-credits value lives inside the user-detail
-    # dropdown (the avatar/profile menu at the top right). It's collapsed by
-    # default, which makes its text invisible to innerText. Click it open first.
-    page.evaluate("""() => {
-        const btn = document.querySelector('[data-testid="my-rewards-dropdown-open-button"]');
-        if (btn) btn.click();
+    # Combine page innerText (for dates etc.) with a space-joined text walk of
+    # the user-detail dropdown. The dropdown holds the real lowercase value
+    # like "4,663 reward credits" but each token sits in a separate <div>, so
+    # textContent smushes it ("4,663reward credits"). Walking text nodes and
+    # joining with spaces preserves word boundaries that the regex needs.
+    text: str = page.evaluate("""() => {
+        function spaceJoinText(el) {
+            if (!el) return '';
+            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+            const parts = [];
+            let node;
+            while ((node = walker.nextNode())) {
+                const t = node.nodeValue.trim();
+                if (t) parts.push(t);
+            }
+            return parts.join(' ');
+        }
+        const body = document.body.innerText || '';
+        const dd = document.querySelector('[data-testid="my-rewards-user-detail-dropdown"]');
+        return body + '\\n' + spaceJoinText(dd);
     }""")
-    random_delay(800, 1500)
-
-    text: str = page.evaluate("() => document.body.innerText")
 
     def grab(pat, group=1, flags=re.I):
         m = re.search(pat, text, flags)
