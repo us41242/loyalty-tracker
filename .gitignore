@@ -4,3 +4,11 @@ playwright-report/
 test-results/
 *.session.json
 debug/
+.venv/
+venv/
+.DS_Store
+__pycache__/
+*.pyc
+logs/
+chrome-profile/
+firefox-profile/
