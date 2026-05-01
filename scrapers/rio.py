@@ -87,25 +87,50 @@ def _scrape_rewards_and_offers(page: Page) -> tuple[dict, list[dict]]:
         ),
     }
 
-    offers: list[dict] = []
-    after = re.split(r"Your Offers", text, flags=re.I)
-    if len(after) > 1:
-        lines = [l.strip() for l in after[1].splitlines() if l.strip()]
-        for i, line in enumerate(lines):
-            m = re.match(r"(?:Offer Valid|Book Offer|Stay Dates):\s*(.+)", line, re.I)
-            if not m:
-                continue
-            title = ""
-            for j in range(i - 1, max(-1, i - 6), -1):
-                if len(lines[j]) > 5 and not re.match(r"^(Book|Stay|Offer|Valid)", lines[j], re.I):
-                    title = lines[j]
-                    break
-            if title:
-                offers.append({"title": title, "dates": m.group(1)})
+    offers = _extract_offers(page)
 
     print(f"  Tier: {snap['tier_status']} | Points: {snap['points_balance']}")
     print(f"  Found {len(offers)} offers")
+    for o in offers:
+        desc = (o.get("description") or "—")[:50]
+        oid = o.get("offerCode") or "—"
+        print(f"    • {o.get('title', '?')[:40]:<40}  desc={desc}  id={oid}")
     return snap, offers
+
+
+def _extract_offers(page: Page) -> list[dict]:
+    """Pull each Rio offer card from the DOM.
+
+    Each card is a <div class="c-dashboard--offer-wrapper"> containing:
+      - h5.c-offer__heading                    → title
+      - span.c-offer__valid (1-2 of them)      → "Book Offer:", "Stay Dates:", or "Offer Valid:" + date range
+      - div.c-offer__description                → description (often duplicates image alt)
+      - a.c-offer__button[href]                 → contains offerCode=NNNN, our stable id (when present)
+    """
+    return page.evaluate("""
+        () => Array.from(document.querySelectorAll('.c-dashboard--offer-wrapper')).map(card => {
+            const txt = el => el ? (el.innerText || el.textContent || '').trim() : '';
+            const title = txt(card.querySelector('.c-offer__heading')) || null;
+
+            // Description: prefer .c-offer__description; fall back to img alt
+            // (Rio's image alt almost always mirrors the description text).
+            let description = txt(card.querySelector('.c-offer__description')) || null;
+            if (!description) {
+                const imgAlt = card.querySelector('img[alt]')?.getAttribute('alt');
+                if (imgAlt) description = imgAlt.trim() || null;
+            }
+
+            const dateLines = Array.from(card.querySelectorAll('.c-offer__valid'))
+                .map(s => txt(s)).filter(Boolean);
+            const href = card.querySelector('a.c-offer__button')?.getAttribute('href') || null;
+            let offerCode = null;
+            if (href) {
+                const m = href.match(/[?&]offerCode=([^&]+)/);
+                if (m) offerCode = m[1];
+            }
+            return { title, description, dateLines, href, offerCode };
+        })
+    """) or []
 
 
 def _save_snapshot(s: dict) -> None:
@@ -116,27 +141,92 @@ def _save_snapshot(s: dict) -> None:
         print("  💾 Saved Rio snapshot")
 
 
+# Titles that are perpetual benefits, not time-bound offers — skip them.
+EXCLUDED_TITLES = {
+    "Your Rio Rewards Member Discount",
+}
+
+
 def _save_offers(offers: list[dict]) -> None:
-    saved = 0
+    """Manual select-then-update/insert. Avoids requiring specific Postgres
+    unique constraints to be installed on the table — works on whatever
+    schema you have as long as the columns exist.
+
+    Dedup key is (offer_code or title) + valid_start + valid_end. Same offer
+    re-listed for a different date window creates a new row (intentional —
+    we keep the history of validity periods)."""
+    saved = skipped = 0
     for o in offers:
-        if not o.get("title"):
+        title = o.get("title")
+        if not title:
             continue
-        valid_start = valid_end = None
-        if o.get("dates"):
-            parts = re.split(r"\s*[-–]\s*", o["dates"])
-            if len(parts) == 2:
-                valid_start = today_iso() if parts[0].strip() == "Now" else parse_date(parts[0].strip())
-                valid_end = parse_date(parts[1].strip())
+        if title in EXCLUDED_TITLES:
+            skipped += 1
+            continue
+
+        date_range = _pick_date_range(o.get("dateLines") or [])
+        valid_start, valid_end = _split_date_range(date_range)
+
         row = {
-            "title": o["title"],
+            "title": title,
             "description": o.get("description"),
+            "offer_code": o.get("offerCode"),
+            "url": o.get("href"),
             "valid_start": valid_start,
             "valid_end": valid_end,
-            "last_seen": today_iso(),
         }
-        res = supabase.table("rio_offers").upsert(
-            row, on_conflict="title,valid_start,valid_end"
-        ).execute()
-        if not getattr(res, "error", None):
+
+        try:
+            existing_id = _find_existing(o.get("offerCode"), title, valid_start, valid_end)
+            if existing_id is not None:
+                supabase.table("rio_offers").update(row).eq("id", existing_id).execute()
+            else:
+                supabase.table("rio_offers").insert(row).execute()
             saved += 1
-    print(f"  💾 Saved {saved} offers")
+        except Exception as e:
+            print(f"  ❌ {title[:40]}: {e}")
+    print(f"  💾 Saved {saved} offers" + (f" (skipped {skipped} excluded)" if skipped else ""))
+
+
+def _find_existing(offer_code: str | None, title: str, valid_start, valid_end):
+    """Same offer_code + same date window = same row (update).
+    Same offer_code + different dates = different row (insert).
+    No offer_code: dedup on title + dates."""
+    q = supabase.table("rio_offers").select("id")
+    if offer_code:
+        res = (q.eq("offer_code", offer_code)
+                .eq("valid_start", valid_start)
+                .eq("valid_end", valid_end)
+                .limit(1).execute())
+    else:
+        res = (q.eq("title", title)
+                .eq("valid_start", valid_start)
+                .eq("valid_end", valid_end)
+                .limit(1).execute())
+    return res.data[0]["id"] if res.data else None
+
+
+def _pick_date_range(date_lines: list[str]) -> str | None:
+    """From ['Book Offer: Now - May 18, 2026', 'Stay Dates: Now - May 18, 2026']
+    return 'Now - May 18, 2026'. Prefer Stay Dates → Offer Valid → Book Offer."""
+    by_kind: dict[str, str] = {}
+    for line in date_lines:
+        m = re.match(r"(Book Offer|Stay Dates|Offer Valid)\s*:\s*(.+)", line, re.I)
+        if m:
+            by_kind[m.group(1).lower()] = m.group(2).strip()
+    return (
+        by_kind.get("stay dates")
+        or by_kind.get("offer valid")
+        or by_kind.get("book offer")
+    )
+
+
+def _split_date_range(date_range: str | None) -> tuple[str | None, str | None]:
+    if not date_range:
+        return None, None
+    parts = re.split(r"\s*[-–]\s*", date_range, maxsplit=1)
+    if len(parts) != 2:
+        return None, parse_date(date_range)
+    start = today_iso() if parts[0].strip().lower() == "now" else parse_date(parts[0].strip())
+    end = parse_date(parts[1].strip())
+    return start, end

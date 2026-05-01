@@ -2,14 +2,14 @@ name: Scrape Caesars
 
 on:
   schedule:
-    # 6:00 AM Pacific = 13:00 UTC (PDT)
+    # 6:00 AM Pacific = 13:00 UTC (PDT). Drifts 1h in PST.
     - cron: '0 13 * * *'
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # Normal run ~45 min + up to 30 min retry wait
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -18,24 +18,23 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install dependencies
-        run: pip install undetected-chromedriver selenium supabase python-dotenv
+      - name: Install Python deps
+        run: pip install -r requirements.txt
 
-      - name: Install Chrome + xvfb
-        run: |
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb xvfb
-          google-chrome-stable --version
+      - name: Cache camoufox browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/camoufox
+          key: camoufox-${{ runner.os }}-v1
 
-      - name: Detect Chrome version
-        run: |
-          CHROME_VERSION=$(google-chrome-stable --version | grep -oP '\d+' | head -1)
-          echo "CHROME_VERSION=$CHROME_VERSION" >> $GITHUB_ENV
-          echo "Detected Chrome version: $CHROME_VERSION"
+      - name: Fetch camoufox (no-op if cached)
+        run: python -m camoufox fetch
 
       - name: Run Caesars scraper
         env:
+          CI: 'true'
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           CAESARS_USERNAME: ${{ secrets.CAESARS_USERNAME }}
@@ -43,13 +42,13 @@ jobs:
           GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
           GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
-        run: xvfb-run --auto-servernum python scrape_caesars.py
+        run: python run.py caesars --headless
 
       - name: Upload debug screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots
+          name: debug-caesars
           path: debug/
           if-no-files-found: ignore
           retention-days: 3

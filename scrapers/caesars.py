@@ -28,7 +28,7 @@ from .browser import (
     react_type,
 )
 from .db import parse_date, supabase
-from .gmail_2fa import fetch_2fa_code  # see note below
+from .gmail_2fa import fetch_2fa_code
 
 
 def scrape_caesars(
@@ -74,9 +74,40 @@ def scrape_caesars(
 
 # ── Login ───────────────────────────────────────────────────────────────────
 def _login(page: Page) -> None:
+    """Automated login. Credentials come from env (CAESARS_USERNAME /
+    CAESARS_PASSWORD), loaded from `.env` locally (via `load_dotenv` in
+    scrapers/db.py) or from GitHub Actions secrets in CI.
+
+    Camoufox handles fingerprinting; this function handles the form fill +
+    submit. 2FA is finished by `_handle_2fa` if Caesars triggers a step-up.
+    """
     print("🔑 Logging in...")
     human_navigate(page, "https://www.caesars.com/myrewards/profile/signin/")
     random_delay(3000, 5000)
+
+    # Dismiss the OneTrust cookie banner if present — it overlays the form
+    # and our clicks land on the banner buttons instead of the inputs.
+    dismissed = page.evaluate("""() => {
+        // Try several known OneTrust selectors in priority order
+        const selectors = [
+            '#onetrust-accept-btn-handler',
+            'button#onetrust-accept-btn-handler',
+            '.ot-pc-refuse-all-handler',
+            'button[aria-label="Accept All"]',
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (el && el.offsetWidth > 0) { el.click(); return sel; }
+        }
+        // Text-based fallback
+        const btn = [...document.querySelectorAll('button')].find(b =>
+            /^(Allow All Cookies|Accept All Cookies|Accept All)$/i.test(b.textContent.trim()) && b.offsetWidth > 0);
+        if (btn) { btn.click(); return 'text-fallback'; }
+        return null;
+    }""")
+    if dismissed:
+        print(f"  🍪 Dismissed cookie banner ({dismissed})")
+        random_delay(1500, 2500)
 
     inputs = page.evaluate("""() => [...document.querySelectorAll('input')].map(i => ({
         type: i.type, name: i.name, id: i.id,
@@ -133,6 +164,8 @@ def _login(page: Page) -> None:
 
 
 def _handle_2fa(page: Page) -> None:
+    """If Caesars sent us to the 2FA step-up page, fetch the latest code from
+    Gmail and enter it. No-op if 2FA wasn't triggered."""
     if "/verification/step-up" not in page.url:
         return
 
@@ -242,104 +275,272 @@ def _scrape_reservations(page: Page, tab: str) -> list[dict]:
     return cards
 
 
-# ── Offers ──────────────────────────────────────────────────────────────────
-def _scrape_offers(page: Page, *, dump_html: bool = False) -> list[dict]:
-    print("🎁 Scraping offers...")
-    human_navigate(page, "https://www.caesars.com/rewards/offers")
-    random_delay(2000, 4000)
+# ── Offers (group URLs + paginated DOM extraction via stable testids) ───────
+# Caesars renders the offers list as React Native Web from a preloaded
+# state — no API call to chase, no "See More" button, no virtualization.
+# Each month has its own URL parameter, and within a month the cards are
+# rendered 10/page with a numbered pagination bar.
+OFFER_GROUP_URLS = [
+    ("current-month", 0),
+    ("next-month", 1),
+    ("following-next-month", 2),
+]
 
-    # Clear filters so all sections are visible
+
+def _month_offset_label(offset: int) -> str:
+    """offset=0 → 'MAY OFFERS' for the current month, etc."""
+    from datetime import datetime
+    today = datetime.now()
+    target_year, target_month = today.year, today.month + offset
+    while target_month > 12:
+        target_month -= 12
+        target_year += 1
+    return datetime(target_year, target_month, 1).strftime("%B").upper() + " OFFERS"
+
+
+def _parse_caesars_date_range(s: str | None) -> tuple[str | None, str | None]:
+    """'Valid 05.08.26 - 05.09.26' → ('2026-05-08', '2026-05-09'). Single-day
+    'Valid 05.08.26' returns the same date for start and end. Also accepts
+    'Valid: ...' (colon variant used in the detail-view text)."""
+    if not s:
+        return (None, None)
+    m = re.search(
+        r"(?:Valid|Expires?):?\s+(\d{1,2})\.(\d{1,2})\.(\d{2,4})(?:\s*-\s*(\d{1,2})\.(\d{1,2})\.(\d{2,4}))?",
+        s, re.I,
+    )
+    if not m:
+        return (None, None)
+
+    def _norm(month: str, day: str, year: str) -> str:
+        y = int(year)
+        if y < 100:
+            y += 2000
+        return f"{y:04d}-{int(month):02d}-{int(day):02d}"
+
+    start = _norm(m.group(1), m.group(2), m.group(3))
+    end = _norm(m.group(4), m.group(5), m.group(6)) if m.group(4) else start
+    return (start, end)
+
+
+def _synth_offer_id(title: str | None, eligible_properties: str | None,
+                     valid_start: str | None, valid_end: str | None) -> str:
+    """Fallback offer_id when the modal doesn't expose a real Caesars ID.
+    Deterministic hash of card content."""
+    import hashlib
+    raw = "|".join([
+        (title or "").strip(),
+        (eligible_properties or "").strip(),
+        valid_start or "",
+        valid_end or "",
+    ])
+    return "ces-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _parse_offer_details_text(text: str | None) -> tuple[str | None, str | None]:
+    """From the offer-details modal's bulk text, return (offer_id, description).
+
+    Observed format:
+        {icon} {TITLE}
+        Valid: 05.04.26 - 05.10.26
+        Offer {OFFER_ID}
+        Add to My Calendar
+        {DESCRIPTION BODY...}
+        AVAILABLE HOTELS & RESORTS  (or AVAILABLE PROPERTIES, etc.)
+        {property names}
+    """
+    if not text:
+        return (None, None)
+    id_m = re.search(r'\bOffer\s+([A-Z0-9]{6,})\b', text)
+    offer_id = id_m.group(1) if id_m else None
+
+    desc_m = re.search(
+        r'Add to My Calendar\s+(.+?)(?=\s+AVAILABLE\s+(?:HOTELS|PROPERTIES|RESORTS)\b|\Z)',
+        text, re.S | re.I,
+    )
+    description = desc_m.group(1).strip() if desc_m else None
+    if description:
+        # Collapse runs of whitespace introduced by inner-text rendering
+        description = re.sub(r"\s+", " ", description).strip()
+    return offer_id, description
+
+
+def _read_offer_detail(page: Page) -> dict | None:
+    """Read the currently-displayed offer detail. Caesars's offer detail is
+    NOT a modal — clicking a card replaces the offer list with a detail view
+    inline. We scope reads to the `offer-details` container so we get the
+    detail's own title/property/date instead of any sidebar cards.
+
+    Properties: in the LIST view a card has a single `offer-property-list`
+    (e.g. 'Las Vegas Resorts'). In the DETAIL view that field isn't always
+    present; instead, individual properties are listed under `offer-property`.
+    We join them with ', '."""
+    return page.evaluate("""() => {
+        const idEl     = document.querySelector('[data-testid="offer-display-id"]');
+        const detailEl = document.querySelector('[data-testid="offer-details"]');
+        if (!idEl || !detailEl) return null;
+        const titleEl  = detailEl.querySelector('[data-testid="offer-title"]');
+        const dateEl   = detailEl.querySelector('[data-testid="offer-expiration-date-text"]');
+        const iconEl   = detailEl.querySelector('img[alt$=" Offer"]');
+        // Try the single property-list first (rare in detail view); fall back
+        // to joining all individual offer-property nodes.
+        const listEl = detailEl.querySelector('[data-testid="offer-property-list"]');
+        let properties = listEl ? listEl.innerText.trim() : null;
+        if (!properties) {
+            const items = [...detailEl.querySelectorAll('[data-testid="offer-property"]')]
+                .map(e => e.innerText.trim()).filter(Boolean);
+            if (items.length) properties = items.join(', ');
+        }
+        return {
+            display_id_text: idEl.innerText.trim(),
+            detail_text: detailEl.innerText,
+            title: titleEl ? titleEl.innerText.trim() : null,
+            eligible_properties: properties,
+            valid_raw: dateEl ? dateEl.innerText.trim() : null,
+            category: iconEl ? iconEl.alt.replace(/ Offer$/, '').trim() : null,
+        };
+    }""")
+
+
+def _click_next_offer(page: Page) -> bool:
+    """Click the in-detail-view 'NEXT offer' arrow. Returns False if the
+    button is gone or disabled (i.e. we've reached the last offer)."""
+    return page.evaluate("""() => {
+        const btn = document.querySelector('[aria-label="View details of NEXT offer."]');
+        if (!btn) return false;
+        if (btn.getAttribute('aria-disabled') === 'true') return false;
+        btn.click();
+        return true;
+    }""")
+
+
+def _scrape_one_group(page: Page, group: str, section: str,
+                       *, dump_html: bool = False) -> list[dict]:
+    url = f"https://www.caesars.com/rewards/offers?group={group}"
+    print(f"  📂 {section}: {url}")
+    human_navigate(page, url)
+    random_delay(2500, 4000)
+
+    # Wait for either an offer card (default list view) or, if Caesars sent us
+    # straight into a detail view for some reason, the offer-display-id node.
     try:
-        cleared = page.evaluate("""() => {
-            const btn = [...document.querySelectorAll('button, a')]
-                .find(e => e.textContent.trim() === 'Clear Filters');
-            if (btn) { btn.click(); return true; }
-            return false;
-        }""")
-        if cleared:
-            random_delay(2000, 3000)
+        page.wait_for_selector(
+            '[data-testid="offer-card"], [data-testid="offer-display-id"]',
+            timeout=15000,
+        )
     except Exception:
-        pass
+        human_scroll(page, 200)
+        try:
+            page.wait_for_selector(
+                '[data-testid="offer-card"], [data-testid="offer-display-id"]',
+                timeout=8000,
+            )
+        except Exception:
+            print(f"     ⚠️ No offers rendered for {section} (URL: {page.url})")
+            debug_snapshot(page, f"offers-{group}-no-cards")
+            return []
 
-    # Click "See More" until it's gone or we've stalled twice
-    stalls = 0
-    last_count = -1
-    for _ in range(40):
-        clicked = page.evaluate("""() => {
-            const btns = [...document.querySelectorAll('button, a')]
-                .filter(e => /See More/i.test(e.textContent.trim()) && e.offsetWidth > 0);
-            for (const b of btns) b.click();
-            return btns.length;
-        }""")
-        if clicked == 0:
+    # Section count from the title (e.g. "MAY OFFERS (67)") for sanity-checking
+    expected = page.evaluate("""() => {
+        const t = document.querySelector('[data-testid="offer-group-section-title"]');
+        if (!t) return 0;
+        const m = (t.innerText || '').match(/\\((\\d+)\\)/);
+        return m ? parseInt(m[1], 10) : 0;
+    }""")
+    if expected:
+        print(f"     section header reports {expected} offer(s)")
+
+    # Click the first card to drop into detail view; from there we step
+    # through each offer with the in-detail "NEXT" arrow.
+    page.evaluate("""() => {
+        const card = document.querySelector('[data-testid="offer-card"]');
+        if (card) card.click();
+    }""")
+
+    try:
+        page.wait_for_selector('[data-testid="offer-display-id"]', timeout=8000)
+    except Exception:
+        print(f"     ⚠️ Detail view didn't open for {section}")
+        debug_snapshot(page, f"offers-{group}-no-detail")
+        return []
+
+    offers: list[dict] = []
+    seen: set[str] = set()
+    safety_cap = max(expected * 2, 200)  # generous upper bound
+
+    for _ in range(safety_cap):
+        random_delay(350, 700)  # let the new offer's detail finish rendering
+        data = _read_offer_detail(page)
+        if not data:
             break
-        random_delay(1200, 2500)
-        human_scroll(page, 600)
-        count = page.evaluate("() => document.querySelectorAll('[data-testid*=offer], article, .offer-card').length")
-        if count == last_count:
-            stalls += 1
-            if stalls >= 2:
-                break
-        else:
-            stalls = 0
-        last_count = count
+
+        # Prefer offer-display-id, fall back to parsing the detail text
+        offer_id = None
+        if data.get("display_id_text"):
+            m = re.search(r"\b([A-Z0-9]{6,})\b", data["display_id_text"])
+            if m:
+                offer_id = m.group(1)
+        if not offer_id:
+            fallback_id, _ = _parse_offer_details_text(data.get("detail_text"))
+            offer_id = fallback_id
+
+        _, description = _parse_offer_details_text(data.get("detail_text"))
+
+        # Date range — try the testid value, then the detail text as backup
+        valid_start, valid_end = _parse_caesars_date_range(data.get("valid_raw"))
+        if not valid_start:
+            valid_start, valid_end = _parse_caesars_date_range(data.get("detail_text"))
+
+        if not offer_id:
+            offer_id = _synth_offer_id(
+                data.get("title"),
+                data.get("eligible_properties"),
+                valid_start,
+                valid_end,
+            )
+
+        if offer_id in seen:
+            # Caesars cycled back to the start — we're done with this section
+            break
+        seen.add(offer_id)
+
+        offers.append({
+            "offer_id": offer_id,
+            "title": data.get("title"),
+            "description": description,
+            "eligible_properties": data.get("eligible_properties"),
+            "valid_start": valid_start,
+            "valid_end": valid_end,
+            "section": section,
+            "category": data.get("category"),
+        })
+
+        # Step to the next offer; bail when there isn't one
+        if not _click_next_offer(page):
+            break
 
     if dump_html:
-        out = DEBUG_DIR / "offers.html"
+        out = DEBUG_DIR / f"offers-{group}.html"
         out.write_text(page.content(), encoding="utf-8")
-        print(f"  📄 Dumped offers HTML → {out}")
 
-    text: str = page.evaluate("() => document.body.innerText")
-    return parse_offers_text(text)
+    print(f"     ✓ {len(offers)} offers from {section}")
+    return offers
+
+
+def _scrape_offers(page: Page, *, dump_html: bool = False) -> list[dict]:
+    print("🎁 Scraping offers...")
+    all_offers: list[dict] = []
+    for group, offset in OFFER_GROUP_URLS:
+        section = _month_offset_label(offset)
+        all_offers.extend(_scrape_one_group(page, group, section, dump_html=dump_html))
+    print(f"  📊 Total: {len(all_offers)} offers across {len(OFFER_GROUP_URLS)} months")
+    return all_offers
 
 
 def parse_offers_text(text: str) -> list[dict]:
-    """Extracted so we can re-run it on saved HTML/text without the browser."""
-    section_re = re.compile(
-        r"^(EXPIRING.*?|(?:JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+OFFERS?)\s*\((\d+)\)",
-        re.I,
-    )
-    expires_re = re.compile(r"^Expires?\s+(today|tomorrow|\d.+)", re.I)
-    valid_re = re.compile(r"^Valid\s+(\d.+)", re.I)
-    skip_prefix = re.compile(
-        r"^(EXPIRING|JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|See More|Clear Filters|FILTER|DESTINATIONS|DATES|OFFER TYPE)",
-        re.I,
-    )
-
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    current_section = "Unknown"
-    results: list[dict] = []
-
-    for i, line in enumerate(lines):
-        ms = section_re.match(line)
-        if ms:
-            current_section = ms.group(1).strip()
-            continue
-
-        m = expires_re.match(line) or valid_re.match(line)
-        if not m:
-            continue
-
-        # Title = first non-skip line above
-        title = ""
-        for j in range(i - 1, max(-1, i - 5), -1):
-            if skip_prefix.match(lines[j]):
-                break
-            title = lines[j]
-            break
-
-        property_ = ""
-        if i >= 2 and not re.match(r"^[A-Z\$\d]", lines[i - 1]) and lines[i - 1] != title:
-            property_ = lines[i - 1]
-
-        results.append({
-            "title": title or None,
-            "section": current_section,
-            "property": property_ or None,
-            "dates": line,
-        })
-
-    return results
+    """Legacy text-mode parser. The current scraper extracts directly from
+    the DOM via stable data-testid selectors, so this function is unused but
+    kept here so anything that still imports it resolves."""
+    return []
 
 
 # ── Great Gift (inline on offers page, no 2FA) ──────────────────────────────
@@ -393,23 +594,34 @@ def _save_reservations(reservations: list[dict]) -> None:
 
 
 def _save_offers(offers: list[dict]) -> None:
-    """NOTE: dedup strategy is the open question — see parse_offers.py."""
+    """Upsert into caesars_offers on offer_id. `timestamp` column is updated
+    on every scrape; first-seen tracking would require a schema migration."""
     import time as _t
+    if not offers:
+        print("  💾 No offers to save")
+        return
+    now_iso = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
     saved = 0
+    errors: list[str] = []
     for o in offers:
-        title = o.get("title")
-        dates = o.get("dates")
-        if not title:
+        if not o.get("title") or not o.get("offer_id"):
             continue
-        offer_id = re.sub(r"\s+", "-", f"{title}-{dates}")[:50]
         row = {
-            "offer_id": offer_id,
-            "title": title,
+            "offer_id": o["offer_id"],
+            "title": o.get("title"),
+            "description": o.get("description"),
             "section": o.get("section"),
-            "eligible_properties": o.get("property"),
-            "last_seen": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+            "eligible_properties": o.get("eligible_properties"),
+            "valid_start": o.get("valid_start"),
+            "valid_end": o.get("valid_end"),
+            "expires_at": o.get("valid_end"),
+            "run_ts": now_iso,
         }
         res = supabase.table("caesars_offers").upsert(row, on_conflict="offer_id").execute()
-        if not getattr(res, "error", None):
+        err = getattr(res, "error", None)
+        if err:
+            errors.append(str(err))
+        else:
             saved += 1
-    print(f"  💾 Saved {saved} offers")
+    suffix = f" ({len(errors)} errors; first: {errors[0][:120]})" if errors else ""
+    print(f"  💾 Upserted {saved} offers{suffix}")

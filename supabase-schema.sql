@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS caesars_reservations (
 CREATE INDEX IF NOT EXISTS idx_caesars_reservations_checkin ON caesars_reservations (check_in DESC);
 
 -- ── Caesars Offers ──────────────────────────────────────────────────────────
+-- Verified against the live DB on 2026-05-01 (introspected via insert).
+-- Note: first_seen/last_seen are NOT present; `run_ts` is the only timestamp.
 CREATE TABLE IF NOT EXISTS caesars_offers (
   id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   offer_id            TEXT NOT NULL UNIQUE,
@@ -53,8 +55,7 @@ CREATE TABLE IF NOT EXISTS caesars_offers (
   valid_start         DATE,
   valid_end           DATE,
   expires_at          DATE,
-  first_seen          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_seen           TIMESTAMPTZ NOT NULL DEFAULT now()
+  run_ts              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_caesars_offers_expires ON caesars_offers (expires_at DESC);
