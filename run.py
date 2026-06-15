@@ -50,6 +50,7 @@ def main() -> int:
         "dump_html": args.dump_html,
     }
 
+    failures: list[str] = []
     with launch_browser(headless=args.headless) as browser:
         for name in targets:
             try:
@@ -59,8 +60,14 @@ def main() -> int:
                     SCRAPERS[name](browser)
             except Exception as e:
                 print(f"\n💥 {name} fatal: {e}")
+                failures.append(name)
 
     print(f"\n🏁 Done in {time.time() - started:.1f}s")
+    # Exit non-zero on any failure so CI/GitHub surfaces it red instead of
+    # reporting a green run that scraped nothing.
+    if failures:
+        print(f"❌ Failed: {', '.join(failures)}")
+        return 1
     return 0
 
 

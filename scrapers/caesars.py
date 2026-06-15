@@ -42,6 +42,11 @@ def scrape_caesars(
     print("═══════════════════════════════════════\n")
 
     page = new_page(browser)
+    # Bound every implicit wait. Without this, a changed selector makes a click/
+    # wait block on Playwright's default until the workflow's timeout-minutes
+    # kill the whole job — exactly the May→June "silent hang" (runs sat on the
+    # login page for 30 min, then showed up only as a "cancelled" run).
+    page.set_default_timeout(20000)
     try:
         if not skip_login:
             _login(page)
@@ -56,10 +61,18 @@ def scrape_caesars(
         _save_snapshot(rewards)
         _save_reservations(past_res + current_res)
         _save_offers(offers)
+
+        # Fail loud: zero offers means the scrape silently broke (login wall or
+        # changed markup). Caesars always has live offers, so treat 0 as failure
+        # rather than letting the run exit green with no data.
+        if not offers:
+            raise RuntimeError("0 offers scraped — treating as failure (login or offers markup likely changed)")
+
         print("\n✅ Caesars scrape complete!\n")
     except Exception as e:
         print(f"❌ Caesars error: {e}")
         debug_snapshot(page, "caesars-error")
+        raise  # propagate so run.py exits non-zero and the GitHub run goes red
     finally:
         page.close()
 
@@ -101,43 +114,31 @@ def _login(page: Page) -> None:
         print(f"  🍪 Dismissed cookie banner ({dismissed})")
         random_delay(1500, 2500)
 
-    inputs = page.evaluate("""() => [...document.querySelectorAll('input')].map(i => ({
-        type: i.type, name: i.name, id: i.id,
-        placeholder: i.placeholder, ariaLabel: i.getAttribute('aria-label'),
-        visible: i.offsetWidth > 0 && i.offsetHeight > 0,
-    }))""")
     debug_snapshot(page, "caesars-login-page")
 
-    if not inputs:
-        random_delay(5000, 8000)
-        inputs = page.evaluate("() => [...document.querySelectorAll('input')].map(i => ({type: i.type, visible: i.offsetWidth > 0}))")
-        if not inputs:
-            text = page.evaluate("() => document.body.innerText.slice(0, 500)")
-            print(f"  Page text: {text}")
-            raise RuntimeError("Login page didn't render — possible bot detection")
+    # Target the sign-in fields by their stable names. The old "first visible
+    # text input" heuristic now grabs the OneTrust cookie-consent search box /
+    # consent checkboxes that share this page, which is what wedged login from
+    # May onward (it typed into the wrong element and then hung).
+    user_sel = _first_present(page, [
+        'input[name="userID"]',
+        'input[aria-label="Email, Mobile, Caesars Rewards #"]',
+        'input#userID',
+    ])
+    pass_sel = _first_present(page, [
+        'input[name="userPassword"]',
+        'input[aria-label="Password"]',
+        'input[type="password"]',
+    ])
+    if not user_sel or not pass_sel:
+        text = page.evaluate("() => document.body.innerText.slice(0, 500)")
+        print(f"  Page text: {text}")
+        raise RuntimeError(f"Login fields not found (user={user_sel}, pass={pass_sel}) — sign-in markup likely changed")
 
-    user_sel = None
-    for inp in inputs:
-        if not inp.get("visible") or inp.get("type") in ("password", "hidden"):
-            continue
-        if inp.get("id"):
-            user_sel = f"#{inp['id']}"
-        elif inp.get("name"):
-            user_sel = f'input[name="{inp["name"]}"]'
-        elif inp.get("ariaLabel"):
-            user_sel = f'input[aria-label="{inp["ariaLabel"]}"]'
-        elif inp.get("placeholder"):
-            user_sel = f'input[placeholder="{inp["placeholder"]}"]'
-        else:
-            user_sel = f'input[type="{inp.get("type") or "text"}"]'
-        break
-
-    if not user_sel:
-        raise RuntimeError("Could not find username input")
-
+    print(f"  Using fields: {user_sel} / {pass_sel}")
     react_type(page, user_sel, os.environ["CAESARS_USERNAME"])
     random_delay(800, 1500)
-    react_type(page, 'input[type="password"]', os.environ["CAESARS_PASSWORD"])
+    react_type(page, pass_sel, os.environ["CAESARS_PASSWORD"])
     random_delay(1000, 2000)
 
     clicked = page.evaluate("""() => {
@@ -151,8 +152,30 @@ def _login(page: Page) -> None:
 
     random_delay(5000, 8000)
     print(f"  URL after login: {page.url}")
+    # Fail loud: still on the sign-in page means credentials/submit didn't take.
+    # Don't fall through and quietly scrape an empty, logged-out session.
     if "/signin" in page.url:
         debug_snapshot(page, "caesars-login-failed")
+        raise RuntimeError(f"Login did not complete — still on {page.url}")
+
+
+def _first_present(page: Page, selectors: list[str], timeout_ms: int = 8000) -> str | None:
+    """Return the first selector resolving to a visible element, polling up to
+    timeout_ms total. Bounded so a missing field fails fast instead of letting a
+    downstream click hang on Playwright's default timeout."""
+    import time as _t
+    deadline = _t.time() + timeout_ms / 1000
+    while _t.time() < deadline:
+        for sel in selectors:
+            el = page.query_selector(sel)
+            if el:
+                try:
+                    if el.is_visible():
+                        return sel
+                except Exception:
+                    pass
+        random_delay(400, 700)
+    return None
 
 
 def _handle_2fa(page: Page) -> None:
