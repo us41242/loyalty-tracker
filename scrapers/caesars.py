@@ -29,6 +29,7 @@ from .browser import (
 )
 from .db import parse_date, supabase
 from .gmail_2fa import fetch_2fa_code
+from .session_cookies import load_cookies, save_cookies
 
 
 def scrape_caesars(
@@ -41,6 +42,12 @@ def scrape_caesars(
     print("  CAESARS REWARDS SCRAPER")
     print("═══════════════════════════════════════\n")
 
+    # Restore the saved Caesars session BEFORE opening a page, so the cookies
+    # apply to the first navigation. CI rides this session because Imperva blocks
+    # automated cold login. Refresh the session locally (visible login) when it
+    # expires — save_cookies() below keeps the rotating Imperva tokens current.
+    had_cookies = load_cookies(browser, "caesars")
+
     page = new_page(browser)
     # Bound every implicit wait. Without this, a changed selector makes a click/
     # wait block on Playwright's default until the workflow's timeout-minutes
@@ -49,8 +56,7 @@ def scrape_caesars(
     page.set_default_timeout(20000)
     try:
         if not skip_login:
-            _login(page)
-            _handle_2fa(page)  # no-op unless the URL is the 2FA step-up page
+            _ensure_session(page, had_cookies=had_cookies)
 
         rewards = _scrape_rewards_home(page)
         past_res = _scrape_reservations(page, "past")
@@ -66,8 +72,11 @@ def scrape_caesars(
         # changed markup). Caesars always has live offers, so treat 0 as failure
         # rather than letting the run exit green with no data.
         if not offers:
-            raise RuntimeError("0 offers scraped — treating as failure (login or offers markup likely changed)")
+            raise RuntimeError("0 offers scraped — treating as failure (session likely expired or offers markup changed)")
 
+        # Refresh the stored session after a good run so Imperva's rotating
+        # tokens (incap_ses_*, reese84, …) stay current for the next CI run.
+        save_cookies(browser, "caesars")
         print("\n✅ Caesars scrape complete!\n")
     except Exception as e:
         print(f"❌ Caesars error: {e}")
@@ -75,6 +84,41 @@ def scrape_caesars(
         raise  # propagate so run.py exits non-zero and the GitHub run goes red
     finally:
         page.close()
+
+
+# ── Session ─────────────────────────────────────────────────────────────────
+def _looks_logged_in(page: Page) -> bool:
+    """Heuristic: the rewards home shows the member's tier/credit balances only
+    when authenticated."""
+    try:
+        body = (page.evaluate("() => document.body.innerText") or "").upper()
+    except Exception:
+        return False
+    return "TIER CREDITS" in body or "REWARD CREDITS" in body
+
+
+def _ensure_session(page: Page, *, had_cookies: bool) -> None:
+    """Prefer the restored cookie session; cold-login only if it isn't valid.
+
+    Cold login is blocked by Imperva in CI, so a failed restore on CI means the
+    saved session expired and needs a fresh local (visible) login to refresh the
+    cookies in Supabase."""
+    if had_cookies:
+        human_navigate(page, "https://www.caesars.com/rewards/home")
+        random_delay(2000, 3500)
+        if "/signin" not in page.url and _looks_logged_in(page):
+            print("  🔓 Session restored from saved cookies — skipping login")
+            return
+        print("  ⚠️ Saved session is not valid (expired or IP-bound); falling back to login")
+
+    _login(page)
+    _handle_2fa(page)
+    if "/signin" in page.url:
+        debug_snapshot(page, "caesars-login-failed")
+        raise RuntimeError(
+            f"No valid saved session and cold login failed (still on {page.url}). "
+            "Refresh the session with a local visible login to repopulate Supabase cookies."
+        )
 
 
 # ── Login ───────────────────────────────────────────────────────────────────
