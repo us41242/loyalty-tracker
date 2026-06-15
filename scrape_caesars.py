@@ -255,6 +255,35 @@ def get_2fa_code():
             print(f"  Attempt {attempt+1}/24 - {e}")
     return input("  Enter 2FA code from email: ").strip()
 
+# ── Session ─────────────────────────────────────────────────────────────────
+def _looks_logged_in(driver):
+    """The rewards home shows tier/credit balances only when authenticated."""
+    try:
+        body = driver.find_element(By.TAG_NAME, 'body').text.upper()
+    except Exception:
+        return False
+    return 'TIER CREDITS' in body or 'REWARD CREDITS' in body
+
+
+def caesars_session(driver):
+    """Ride the saved Supabase session if valid; cold-login only as fallback.
+
+    Imperva blocks automated cold login in CI, so a failed restore there means
+    the saved session expired — refresh it with a local `--visible` login, which
+    repopulates the cookies in Supabase."""
+    if load_cookies(driver, 'caesars', 'caesars.com'):
+        driver.get('https://www.caesars.com/rewards/home')
+        human_delay(3, 5)
+        if '/signin' not in driver.current_url and _looks_logged_in(driver):
+            print("  🔓 Session restored from saved cookies — skipping login")
+            return
+        print("  ⚠️ Saved session not valid (expired/IP-bound); falling back to login")
+    caesars_login(driver)
+    if '/signin' in driver.current_url:
+        raise RuntimeError("No valid saved session and cold login failed — "
+                           "refresh cookies via a local --visible login")
+
+
 # ── Login ─────────────────────────────────────────────────────────────────────
 def caesars_login(driver):
     print("🔑 Logging in to Caesars...")
@@ -799,7 +828,7 @@ def main():
     driver = make_driver(visible)
     exit_code = 0
     try:
-        caesars_login(driver)
+        caesars_session(driver)
 
         # ── API-based fetching (reservations + offers) ───────────────
         sectoken = get_sectoken(driver)
@@ -835,8 +864,8 @@ def main():
         key_vals = [rewards.get('reward_credits'), rewards.get('tier_credits'), rewards.get('great_gift_points')]
         if all(v is None for v in key_vals):
             print("\n⚠️  reward_credits, tier_credits, and great_gift_points are all null.")
-            print("    Waiting 30 minutes then retrying snapshot scrape...")
-            time.sleep(30 * 60)
+            print("    Waiting 60s then retrying snapshot scrape...")
+            time.sleep(60)
             rewards = scrape_caesars_rewards(driver)
             great_gift = scrape_caesars_great_gift(driver)
             rewards['great_gift_points'] = great_gift
@@ -848,6 +877,9 @@ def main():
         save_caesars_snapshot(rewards)
         save_caesars_reservations(reservations)
         save_caesars_offers(offers)
+        # Refresh the stored session so Imperva's rotating tokens stay current
+        # for the next CI run (we skipped login, so caesars_login didn't save).
+        save_cookies(driver, 'caesars')
         if exit_code == 0:
             print("\n✅ Caesars scrape complete!")
     except Exception as e:
