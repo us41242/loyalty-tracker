@@ -62,6 +62,7 @@ jobs:
         if: steps.dst.outputs.run == 'true'
         env:
           CI: 'true'
+          PYTHONUNBUFFERED: '1'   # stream scraper prints live; buffered stdout was lost on timeout SIGKILL
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           CAESARS_USERNAME: ${{ secrets.CAESARS_USERNAME }}
