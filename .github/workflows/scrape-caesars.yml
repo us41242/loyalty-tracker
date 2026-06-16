@@ -47,7 +47,7 @@ jobs:
       # page errors in CI (pageError.location.url TypeError); Chrome does not.
       - name: Install dependencies
         if: steps.dst.outputs.run == 'true'
-        run: pip install undetected-chromedriver selenium supabase python-dotenv
+        run: pip install selenium webdriver-manager supabase python-dotenv
 
       - name: Install Chrome + xvfb
         if: steps.dst.outputs.run == 'true'

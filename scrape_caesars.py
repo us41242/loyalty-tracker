@@ -17,7 +17,6 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, date, timezone, timedelta
 
-import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -787,29 +786,34 @@ def save_caesars_offers(offers):
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
 def make_driver(visible=False):
-    options = uc.ChromeOptions()
-    options.add_argument('--window-size=1920,1080')
-    options.add_argument('--lang=en-US')
+    common = ['--window-size=1920,1080', '--lang=en-US']
+
     if visible:
+        # Local debug: undetected_chromedriver for anti-bot bypass on cold login.
+        import undetected_chromedriver as uc
+        options = uc.ChromeOptions()
+        for a in common:
+            options.add_argument(a)
         options.add_argument('--start-maximized')
-    # DO NOT use --headless — Imperva detects it.
-    # On CI, xvfb provides a virtual display instead.
+        return uc.Chrome(options=options, use_subprocess=True)
 
-    # Pin the binary to google-chrome-stable so uc and the version detection
-    # both reference the exact same executable.
+    # CI: plain selenium + webdriver-manager. ChromeDriverManager auto-downloads a
+    # chromedriver matching the installed Chrome, so new Chrome majors never break
+    # it (uc 3.5.5 timed out on Chrome 149). Runs non-headless under xvfb to avoid
+    # Imperva's headless detection; the restored cookies carry the session, so we
+    # don't need uc's stealth to log in.
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    options = webdriver.ChromeOptions()
+    for a in common:
+        options.add_argument(a)
     options.binary_location = '/usr/bin/google-chrome-stable'
-
-    # Read Chrome version set by the workflow's "Detect Chrome version" step.
-    # This ensures version_main matches the binary uc will actually launch.
-    chrome_ver = None
-    ver_str = os.environ.get('CHROME_VERSION', '')
-    if ver_str.isdigit():
-        chrome_ver = int(ver_str)
-        print(f"  Chrome version from env: {chrome_ver}")
-
-    if chrome_ver:
-        return uc.Chrome(options=options, use_subprocess=True, version_main=chrome_ver)
-    return uc.Chrome(options=options, use_subprocess=True)
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    options.add_experimental_option('useAutomationExtension', False)
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=options)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
