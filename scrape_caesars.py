@@ -270,13 +270,24 @@ def caesars_session(driver):
     Imperva blocks automated cold login in CI, so a failed restore there means
     the saved session expired — refresh it with a local `--visible` login, which
     repopulates the cookies in Supabase."""
+    # Bound page loads so a hung navigation falls through instead of killing the
+    # run. The cookie check is best-effort — on a datacenter IP the Imperva
+    # cookies are rejected (IP-bound), so we degrade to a real uc cold login.
+    try:
+        driver.set_page_load_timeout(45)
+    except Exception:
+        pass
     if load_cookies(driver, 'caesars', 'caesars.com'):
-        driver.get('https://www.caesars.com/rewards/home')
-        human_delay(3, 5)
-        if '/signin' not in driver.current_url and _looks_logged_in(driver):
-            print("  🔓 Session restored from saved cookies — skipping login")
-            return
-        print("  ⚠️ Saved session not valid (expired/IP-bound); falling back to login")
+        try:
+            driver.get('https://www.caesars.com/rewards/home')
+            human_delay(3, 5)
+            if '/signin' not in driver.current_url and _looks_logged_in(driver):
+                print("  🔓 Session restored from saved cookies — skipping login")
+                return
+        except Exception as e:
+            print(f"  ⚠️ Cookie session check failed ({e}); falling back to login")
+        else:
+            print("  ⚠️ Saved session not valid (expired/IP-bound); falling back to login")
     caesars_login(driver)
     if '/signin' in driver.current_url:
         raise RuntimeError("No valid saved session and cold login failed — "
