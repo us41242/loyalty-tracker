@@ -786,34 +786,35 @@ def save_caesars_offers(offers):
 
 # ── Browser setup ─────────────────────────────────────────────────────────────
 def make_driver(visible=False):
-    common = ['--window-size=1920,1080', '--lang=en-US']
+    # undetected_chromedriver + a real display is what gets past Imperva's bot
+    # wall from a datacenter IP (this is what ran clean Apr 6–15 on Chrome 147).
+    # NEVER --headless — Imperva flags it; CI uses xvfb for a virtual display.
+    import undetected_chromedriver as uc
+    options = uc.ChromeOptions()
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--lang=en-US')
 
     if visible:
-        # Local debug: undetected_chromedriver for anti-bot bypass on cold login.
-        import undetected_chromedriver as uc
-        options = uc.ChromeOptions()
-        for a in common:
-            options.add_argument(a)
         options.add_argument('--start-maximized')
         return uc.Chrome(options=options, use_subprocess=True)
 
-    # CI: plain selenium + webdriver-manager. ChromeDriverManager auto-downloads a
-    # chromedriver matching the installed Chrome, so new Chrome majors never break
-    # it (uc 3.5.5 timed out on Chrome 149). Runs non-headless under xvfb to avoid
-    # Imperva's headless detection; the restored cookies carry the session, so we
-    # don't need uc's stealth to log in.
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
-    options = webdriver.ChromeOptions()
-    for a in common:
-        options.add_argument(a)
-    options.binary_location = '/usr/bin/google-chrome-stable'
-    options.add_argument('--disable-blink-features=AutomationControlled')
-    options.add_experimental_option('excludeSwitches', ['enable-automation'])
-    options.add_experimental_option('useAutomationExtension', False)
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
+    # CI: pin to a Chrome-for-Testing build uc can actually drive. uc 3.5.5 times
+    # out on the runner's bleeding-edge Chrome (149); the workflow downloads a
+    # matched Chrome 147 + chromedriver and passes their paths via env.
+    chrome_bin = os.environ.get('CHROME_BIN') or None
+    driver_bin = os.environ.get('CHROMEDRIVER_BIN') or None
+    ver_str = os.environ.get('CHROME_VERSION', '')
+    version_main = int(ver_str) if ver_str.isdigit() else None
+    if chrome_bin:
+        options.binary_location = chrome_bin
+        print(f"  Chrome (CfT): {chrome_bin}  v{version_main}")
+    return uc.Chrome(
+        options=options,
+        use_subprocess=True,
+        version_main=version_main,
+        browser_executable_path=chrome_bin,
+        driver_executable_path=driver_bin,
+    )
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():

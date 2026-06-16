@@ -42,26 +42,34 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Caesars uses the Chrome (undetected-chromedriver + xvfb) engine — NOT
-      # camoufox. The Playwright-Firefox driver crashes on Caesars' uncaught
-      # page errors in CI (pageError.location.url TypeError); Chrome does not.
+      # Caesars uses undetected-chromedriver + xvfb (headful) — the engine that
+      # got past Imperva from a datacenter IP Apr 6–15. camoufox/Playwright-FF
+      # crashes in CI on Caesars' page errors, and plain Selenium has no stealth.
       - name: Install dependencies
         if: steps.dst.outputs.run == 'true'
-        run: pip install selenium webdriver-manager supabase python-dotenv
+        run: pip install undetected-chromedriver selenium supabase python-dotenv
 
-      - name: Install Chrome + xvfb
+      # uc 3.5.5 can't drive the runner's bleeding-edge Chrome (149) — it ran
+      # clean on 147. Pin a matched Chrome-for-Testing 147 + chromedriver.
+      - name: Install pinned Chrome 147 + xvfb
         if: steps.dst.outputs.run == 'true'
         run: |
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb xvfb
-          google-chrome-stable --version
-
-      - name: Detect Chrome version
-        if: steps.dst.outputs.run == 'true'
-        run: |
-          CHROME_VERSION=$(google-chrome-stable --version | grep -oP '\d+' | head -1)
-          echo "CHROME_VERSION=$CHROME_VERSION" >> $GITHUB_ENV
-          echo "Detected Chrome version: $CHROME_VERSION"
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+          JSON=https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json
+          BUILD=$(curl -s "$JSON" | jq -c '[.versions[] | select(.version|startswith("147."))] | last')
+          CHROME_URL=$(echo "$BUILD" | jq -r '.downloads.chrome[]       | select(.platform=="linux64") | .url')
+          DRIVER_URL=$(echo "$BUILD" | jq -r '.downloads.chromedriver[] | select(.platform=="linux64") | .url')
+          VER=$(echo "$BUILD" | jq -r '.version' | cut -d. -f1)
+          echo "Pinning Chrome $(echo "$BUILD" | jq -r .version)"
+          curl -sSL "$CHROME_URL"  -o /tmp/chrome.zip  && unzip -q /tmp/chrome.zip  -d /tmp
+          curl -sSL "$DRIVER_URL" -o /tmp/driver.zip && unzip -q /tmp/driver.zip -d /tmp
+          CHROME_BIN=/tmp/chrome-linux64/chrome
+          DRIVER_BIN=/tmp/chromedriver-linux64/chromedriver
+          chmod +x "$CHROME_BIN" "$DRIVER_BIN"
+          echo "CHROME_BIN=$CHROME_BIN"           >> $GITHUB_ENV
+          echo "CHROMEDRIVER_BIN=$DRIVER_BIN"      >> $GITHUB_ENV
+          echo "CHROME_VERSION=$VER"               >> $GITHUB_ENV
+          "$CHROME_BIN" --version || true
 
       - name: Run Caesars scraper
         if: steps.dst.outputs.run == 'true'
