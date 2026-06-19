@@ -46,7 +46,10 @@ def scrape_caesars(
     # apply to the first navigation. CI rides this session because Imperva blocks
     # automated cold login. Refresh the session locally (visible login) when it
     # expires — save_cookies() below keeps the rotating Imperva tokens current.
-    had_cookies = load_cookies(browser, "caesars")
+    # In profile mode (--skip-login) the persistent camoufox profile already
+    # carries a logged-in session; loading Supabase's IP-bound cookies on top
+    # would corrupt it, so skip that.
+    had_cookies = False if skip_login else load_cookies(browser, "caesars")
 
     page = new_page(browser)
     # Bound every implicit wait. Without this, a changed selector makes a click/
@@ -104,13 +107,25 @@ def _ensure_session(page: Page, *, had_cookies: bool) -> None:
     saved session expired and needs a fresh local (visible) login to refresh the
     cookies in Supabase."""
     if had_cookies:
-        human_navigate(page, "https://www.caesars.com/rewards/home")
-        random_delay(2000, 3500)
-        if "/signin" not in page.url and _looks_logged_in(page):
-            print("  🔓 Session restored from saved cookies — skipping login")
-            return
-        print("  ⚠️ Saved session is not valid (expired or IP-bound); falling back to login")
+        try:
+            human_navigate(page, "https://www.caesars.com/rewards/home")
+            try:
+                page.wait_for_load_state("networkidle", timeout=12000)
+            except Exception:
+                pass  # let any Imperva/login redirect settle before we read it
+            random_delay(2000, 3500)
+            if "/signin" not in page.url and _looks_logged_in(page):
+                print("  🔓 Session restored from saved cookies — skipping login")
+                return
+            print("  ⚠️ Saved session is not valid (expired or IP-bound); falling back to login")
+        except Exception as e:
+            print(f"  ⚠️ Cookie session check raced a navigation ({e}); falling back to login")
 
+    try:
+        page.context.clear_cookies()
+        print("  🧹 Cleared stale cookies for a clean cold login")
+    except Exception:
+        pass
     _login(page)
     _handle_2fa(page)
     if "/signin" in page.url:
@@ -132,6 +147,10 @@ def _login(page: Page) -> None:
     """
     print("🔑 Logging in...")
     human_navigate(page, "https://www.caesars.com/myrewards/profile/signin/")
+    try:
+        page.wait_for_load_state("networkidle", timeout=12000)
+    except Exception:
+        pass  # let the Imperva JS challenge / redirect settle before we touch the DOM
     random_delay(3000, 5000)
 
     # Dismiss the OneTrust cookie banner if present — it overlays the form
@@ -157,6 +176,20 @@ def _login(page: Page) -> None:
     if dismissed:
         print(f"  🍪 Dismissed cookie banner ({dismissed})")
         random_delay(1500, 2500)
+
+    # Belt-and-suspenders: physically remove any remaining OneTrust overlay so it
+    # can't intercept the click on the login fields (headful renders the banner;
+    # the userID click was timing out under it).
+    try:
+        page.evaluate("""() => {
+            for (const id of ['onetrust-consent-sdk','onetrust-banner-sdk','ot-sdk-container','onetrust-pc-sdk']) {
+                const el = document.getElementById(id); if (el) el.remove();
+            }
+            const bg = document.querySelector('.onetrust-pc-dark-filter'); if (bg) bg.remove();
+            document.body.style.overflow = 'auto';
+        }""")
+    except Exception:
+        pass
 
     debug_snapshot(page, "caesars-login-page")
 
@@ -185,6 +218,27 @@ def _login(page: Page) -> None:
     react_type(page, pass_sel, os.environ["CAESARS_PASSWORD"])
     random_delay(1000, 2000)
 
+    # Verify the fields actually hold our values — camoufox/React can drop the
+    # synthetic keystrokes. Fall back to Playwright's native fill if empty.
+    def _filled():
+        try:
+            return page.evaluate(
+                "(s) => {const u=document.querySelector(s[0]),p=document.querySelector(s[1]);"
+                "return {u:(u&&u.value)||'', pl:((p&&p.value)||'').length};}",
+                [user_sel, pass_sel])
+        except Exception:
+            return {"u": "", "pl": 0}
+    st = _filled()
+    if not st["u"] or not st["pl"]:
+        print(f"  ↻ fields empty after react_type (u={st['u']!r} pl={st['pl']}); retrying with page.fill")
+        try:
+            page.fill(user_sel, os.environ["CAESARS_USERNAME"])
+            page.fill(pass_sel, os.environ["CAESARS_PASSWORD"])
+            st = _filled()
+        except Exception as e:
+            print(f"  page.fill failed: {e}")
+    print(f"  pre-submit fields: user={st['u']!r} passLen={st['pl']}")
+
     clicked = page.evaluate("""() => {
         const btn = [...document.querySelectorAll('button')].find(b =>
             /^(SIGN IN|Sign In|Log In|LOGIN)$/i.test(b.textContent.trim()) && b.offsetWidth > 0);
@@ -194,13 +248,36 @@ def _login(page: Page) -> None:
     if not clicked:
         page.keyboard.press("Enter")
 
-    random_delay(5000, 8000)
-    print(f"  URL after login: {page.url}")
-    # Fail loud: still on the sign-in page means credentials/submit didn't take.
-    # Don't fall through and quietly scrape an empty, logged-out session.
-    if "/signin" in page.url:
-        debug_snapshot(page, "caesars-login-failed")
-        raise RuntimeError(f"Login did not complete — still on {page.url}")
+    # Diagnostic: confirm the fields actually held our values and surface any
+    # validation error — distinguishes a fill bug from server-side rejection.
+    random_delay(3000, 4000)
+    try:
+        vals = page.evaluate("""() => ({
+            user: (document.querySelector('input[name=\"userID\"]')||{}).value || '',
+            passLen: ((document.querySelector('input[name=\"userPassword\"]')||{}).value || '').length,
+            err: (document.body.innerText.match(/incorrect|invalid|try again|do(?:es)? not match|locked|unable|too many/i)||[''])[0],
+            url: location.href
+        })""")
+        print(f"  post-submit: user={vals.get('user')!r} passLen={vals.get('passLen')} err={vals.get('err')!r}")
+    except Exception as e:
+        print(f"  post-submit probe failed: {e}")
+    debug_snapshot(page, "caesars-postsubmit")
+
+    # Poll for the post-submit outcome instead of checking once too early — the
+    # page transitions /signin → (2FA step-up) → /rewards/home, and a single
+    # early check caught it mid-flight and bailed.
+    import time as _t
+    deadline = _t.time() + 35
+    while _t.time() < deadline:
+        url = page.url
+        if "/verification/step-up" in url:
+            print("  → 2FA step-up reached")
+            return
+        if "/signin" not in url:
+            print(f"  URL after login: {url}")
+            return
+        random_delay(1500, 2500)
+    print(f"  URL after login (timeout): {page.url}")
 
 
 def _first_present(page: Page, selectors: list[str], timeout_ms: int = 8000) -> str | None:
@@ -265,45 +342,96 @@ def _scrape_rewards_home(page: Page) -> dict:
     """
     print("📊 Scraping rewards home...")
     human_navigate(page, "https://www.caesars.com/rewards/home")
-    random_delay(2000, 4000)
 
-    # Walk every text node in the body and join with spaces. This is what
-    # BeautifulSoup's get_text(' ') does — and unlike innerText, it captures
-    # CSS-hidden text. The real "4,663 reward credits" lives 13+ levels deep
-    # in a marketing widget with no useful testid, but our regex finds it
-    # cleanly once we have the text with proper word boundaries.
-    text: str = page.evaluate("""() => {
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-        const parts = [];
-        let node;
-        while ((node = walker.nextNode())) {
-            const t = node.nodeValue.trim();
-            if (t) parts.push(t);
+    def read_once() -> dict:
+        # Walk every text node (captures CSS-hidden balances). Tier credits show
+        # as "62,994 TC", next tier as "12,006 until Diamond Elite".
+        text: str = page.evaluate("""() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            const parts = []; let node;
+            while ((node = walker.nextNode())) { const t = node.nodeValue.trim(); if (t) parts.push(t); }
+            return parts.join(' ');
+        }""")
+        # Reward Credits is a CSS odometer (digit reels). Each digit COLUMN carries
+        # its real value in an aria-label ("<div aria-label='4'>…"), so read those in
+        # document order — far more robust than the old geometry guess, which picked
+        # the reel's vertical-center digit ("5" out of a 9→0 reel) instead of the
+        # bottom-aligned visible one. querySelectorAll preserves left-to-right order.
+        reward_credits_odo = page.evaluate(r"""() => {
+            const root = document.querySelector('[data-testid="my-rewards-user-detail-dropdown-reward-credits"]');
+            if (!root) return null;
+            const digits = [...root.querySelectorAll('[aria-label]')]
+                .map(el => el.getAttribute('aria-label'))
+                .filter(v => /^\d$/.test(v));
+            if (!digits.length) return null;
+            const n = parseInt(digits.join(''), 10);
+            return Number.isFinite(n) ? n : null;
+        }""")
+
+        def grab(pat, group=1, flags=re.I):
+            m = re.search(pat, text, flags)
+            return m.group(group) if m else None
+
+        def grab_int(pat, flags=re.I):
+            v = grab(pat, flags=flags)
+            return int(v.replace(",", "")) if v else None
+
+        # AUTHORITATIVE reward-credits value: the page's own account summary renders
+        # "Reward Credits: 809" (header greeting) and "Reward Credits 809" (tile).
+        # The CSS odometer widget is a collapsed dropdown that reads "0" until
+        # expanded — actively misleading — so it is NOT used as a value source, only
+        # logged for debug. Match the labeled value (colon form first, then the
+        # lowercase "809 reward credits" fallback).
+        reward_text = (grab_int(r"Reward Credits:\s*([\d,]+)")
+                       or grab_int(r"([\d,]+)\s+reward credits\b", flags=0))
+        # One-time DOM dump so the odometer reconstruction can be fixed against the
+        # real markup if the text match is ALSO wrong.
+        try:
+            import os as _os
+            _os.makedirs("/home/ubuntu/lt/debug", exist_ok=True)
+            _html = page.evaluate("""() => { const r = document.querySelector('[data-testid="my-rewards-user-detail-dropdown-reward-credits"]'); return r ? r.outerHTML : 'NO_ROOT'; }""")
+            with open("/home/ubuntu/lt/debug/reward_odo.html", "w") as _f:
+                _f.write(_html or "EMPTY")
+        except Exception:
+            pass
+        print(f"  [reward-credits debug] text-match={reward_text}  odometer={reward_credits_odo}")
+
+        # Caesars rewards-home (2026-06): "Reward Credits <odometer> · 62,994 TC ·
+        # 12,006 until Diamond Elite". 62,994 = EARNED tier credits; 12,006 = to next tier.
+        return {
+            "reward_credits": reward_text,  # text is authoritative; odometer reads collapsed-dropdown garbage
+            "tier_credits": grab_int(r"([\d,]+)\s+TC\b") or grab_int(r"([\d,]+)\s+TIER CREDITS\b"),
+            "tier_status": grab(r"(SEVEN STARS|DIAMOND ELITE|DIAMOND PLUS|DIAMOND|PLATINUM|GOLD)"),
+            "tier_next": grab(r"until\s+(Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)") or grab(r"[\d,]+\s+to\s+(Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
+            "tier_credits_needed": grab_int(r"\bTC\s+([\d,]+)\s+until") or grab_int(r"([\d,]+)\s+to\s+(?:Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
+            "last_earned_date": parse_date(grab(r"Last credits earned:\s*(\d{2}/\d{2}/\d{4})")),
+            "credits_expire_date": parse_date(grab(r"Earn more Reward Credits before\s*(\d{2}/\d{2}/\d{4})")),
         }
-        return parts.join(' ');
-    }""")
 
-    def grab(pat, group=1, flags=re.I):
-        m = re.search(pat, text, flags)
-        return m.group(group) if m else None
+    # WAIT up to 30s for the balances to render AND the reward-credits odometer to
+    # SETTLE (two consecutive equal, non-null reads) before trusting it. The page
+    # loads async — reading too early gave nulls and a mid-roll odometer digit.
+    import time as _t
+    data = read_once()
+    prev_reward = object()  # sentinel: first compare is always False → forces a re-read
+    deadline = _t.time() + 30
+    while _t.time() < deadline:
+        if (data["tier_credits"] is not None and data["reward_credits"] is not None
+                and data["reward_credits"] == prev_reward):
+            break
+        prev_reward = data["reward_credits"]
+        _t.sleep(1.5)
+        data = read_once()
 
-    def grab_int(pat, flags=re.I):
-        v = grab(pat, flags=flags)
-        return int(v.replace(",", "")) if v else None
-
-    data = {
-        # Case-sensitive lowercase: skips the digit-rolling animation.
-        "reward_credits": grab_int(r"([\d,]+)\s+reward credits\b", flags=0),
-        "tier_credits": grab_int(r"([\d,]+)\s+TIER CREDITS\b"),
-        "tier_status": grab(r"(SEVEN STARS|DIAMOND ELITE|DIAMOND PLUS|DIAMOND|PLATINUM|GOLD)"),
-        "tier_next": grab(r"[\d,]+\s+to\s+(Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
-        "tier_credits_needed": grab_int(r"([\d,]+)\s+to\s+(?:Seven Stars|Diamond Elite|Diamond Plus|Diamond|Platinum|Gold)"),
-        "last_earned_date": parse_date(grab(r"Last credits earned:\s*(\d{2}/\d{2}/\d{4})")),
-        "credits_expire_date": parse_date(grab(r"Earn more Reward Credits before\s*(\d{2}/\d{2}/\d{4})")),
-    }
-    if not data["reward_credits"]:
+    # HARD non-null check: never silently save/return missing balances — fail loud.
+    missing = [k for k in ("reward_credits", "tier_credits") if data.get(k) is None]
+    if missing:
         debug_snapshot(page, "caesars-rewards-home")
-    print(f"  Credits: {data['reward_credits']} | Tier: {data['tier_credits']} {data['tier_status']}")
+        raise RuntimeError(f"Caesars rewards: {missing} still null after 30s wait — "
+                           "page didn't finish loading or the markup changed")
+
+    print(f"  Reward credits: {data['reward_credits']} | Tier credits: {data['tier_credits']} "
+          f"({data['tier_credits_needed']} to {data['tier_next']}) | {data['tier_status']}")
     return data
 
 
@@ -325,36 +453,66 @@ def _scrape_reservations(page: Page, tab: str) -> list[dict]:
     except Exception:
         pass
 
-    text: str = page.evaluate("() => document.body.innerText")
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # WAIT up to 30s for reservation content to render before reading. The cards
+    # load async — reading too early found 0 even though the booking was there
+    # (the debug snapshot a beat later had the full Vanderpump reservation).
+    # Stop early once a reservation ("Confirmation") OR an empty-state appears.
+    import time as _t
+    _dl = _t.time() + 30
+    while _t.time() < _dl:
+        t = page.evaluate("() => document.body.innerText") or ""
+        if any(k in t for k in ("Confirmation", "Check-in", "Check-In")) or \
+           any(k in t for k in ("No upcoming", "No reservations", "no upcoming", "don't have any")):
+            break
+        _t.sleep(1.5)
+
+    # The redesigned stays page renders each reservation as FLAT inline text with
+    # new labels (no per-line layout, no Location/Adults/Children labels):
+    #   "Property The Vanderpump Hotel Check-in Mon, Jun 29 4:00 PM
+    #    Check-out Wed, Jul 01 11:00 AM Confirmation RGLWQ Guests 1 Adult, 0 Child"
+    # Parse that pattern off the whitespace-collapsed body text.
+    from datetime import datetime as _dt
+    text: str = page.evaluate("() => document.body.innerText") or ""
+    flat = re.sub(r"\s+", " ", text)
+
+    _MON = {m: i for i, m in enumerate(
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+         "Aug", "Sep", "Oct", "Nov", "Dec"], start=1)}
+
+    def _frag_to_iso(frag: str) -> str | None:
+        # "Mon, Jun 29 4:00 PM" → "2026-06-29"; roll year forward if the month
+        # is already behind us (a Jan booking viewed in Dec is next year).
+        m = re.search(r"\b([A-Z][a-z]{2})\s+(\d{1,2})\b", frag or "")
+        if not m or m.group(1) not in _MON:
+            return None
+        mon, day = _MON[m.group(1)], int(m.group(2))
+        now = _dt.now()
+        year = now.year + (1 if mon < now.month else 0)
+        return f"{year}-{mon:02d}-{day:02d}"
+
+    res_re = re.compile(
+        r"Property\s+(.+?)\s+Check-in\s+(.+?)\s+Check-out\s+(.+?)\s+"
+        r"Confirmation\s+([A-Z0-9]{4,})\s+Guests\s+(\d+)\s+Adults?(?:,\s*(\d+)\s+Child)?",
+        re.I,
+    )
     cards: list[dict] = []
-    for i, line in enumerate(lines):
-        if line != "Property":
-            continue
-        card = {"tab": tab}
-        for j in range(i, min(i + 20, len(lines))):
-            label = lines[j]
-            value = lines[j + 1] if j + 1 < len(lines) else None
-            if label == "Property":
-                card["property"] = value
-            elif label == "Location":
-                card["location"] = value
-            elif label == "Check-In":
-                card["checkIn"] = value
-            elif label == "Checkout":
-                card["checkOut"] = value
-            elif label == "Adults":
-                try: card["adults"] = int(value)
-                except: card["adults"] = None
-            elif label == "Children":
-                try: card["children"] = int(value)
-                except: card["children"] = None
-            elif label == "Confirmation":
-                card["confirmationCode"] = value
-        if card.get("confirmationCode"):
-            cards.append(card)
+    for m in res_re.finditer(flat):
+        prop, ci, co, conf, adults, children = m.groups()
+        cards.append({
+            "tab": tab,
+            "property": prop.strip(),
+            "checkIn": _frag_to_iso(ci),
+            "checkOut": _frag_to_iso(co),
+            "confirmationCode": conf.strip(),
+            "adults": int(adults) if adults else None,
+            "children": int(children) if children else None,
+        })
 
     print(f"  Found {len(cards)} {tab} reservations")
+    if not cards:
+        # No "Property" cards parsed — save the page so we can see if the stays
+        # layout changed (the Vanderpump/ex-Cromwell booking should be here).
+        debug_snapshot(page, f"caesars-stays-{tab}")
     return cards
 
 
@@ -643,6 +801,12 @@ def _scrape_great_gift(page: Page) -> int | None:
 
 # ── Save Functions ──────────────────────────────────────────────────────────
 def _save_snapshot(data: dict) -> None:
+    # Stamp run_ts in Pacific with the CORRECT offset (-07:00/-08:00). The DB
+    # column default produced Pacific wall-clock mislabeled "+00:00" (zulu), so
+    # the instant read wrong; setting it explicitly here overrides that default.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    data = {**data, "run_ts": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()}
     res = supabase.table("caesars_rewards_snapshots").insert(data).execute()
     if getattr(res, "error", None):
         print(f"  ❌ Snapshot save error: {res.error}")

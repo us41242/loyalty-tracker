@@ -25,7 +25,9 @@ from .db import parse_date, supabase
 from .session_cookies import load_cookies, save_cookies
 
 
-def scrape_mgm(browser: BrowserContext) -> None:
+def scrape_mgm(browser: BrowserContext) -> dict | None:
+    """Scrape + save MGM. Returns the rewards snapshot dict (or None on hard
+    failure) so the combined runner can validate fields and decide on a retry."""
     print("\n═══════════════════════════════════════")
     print("  MGM REWARDS SCRAPER")
     print("═══════════════════════════════════════\n")
@@ -34,21 +36,37 @@ def scrape_mgm(browser: BrowserContext) -> None:
     load_cookies(browser, "mgm")
 
     page = new_page(browser)
+    rewards = None
     try:
-        _login(page)
-        # Save the (possibly refreshed) cookies after a successful login.
+        # MGM balances only render after the OAuth/login flow runs (a cold
+        # /rewards/ visit returns an empty shell). Run the login flow to refresh
+        # the token — it rides the saved session; cred entry is harmless if
+        # already authed. Wrapped so an MFA-enroll dead-end doesn't abort.
+        try:
+            _login(page)
+        except Exception as e:
+            print(f"  ⚠️ login/refresh note: {e}")
         save_cookies(browser, "mgm")
-
         rewards = _scrape_rewards(page)
+        # HARD non-null check: never save/move on with missing balances. Fail loud
+        # so the run goes red (session expired / markup changed) instead of silently
+        # storing nulls.
+        missing = [k for k in ("tier_status", "tier_credits", "rewards_points") if rewards.get(k) is None]
+        if missing:
+            debug_snapshot(page, "mgm-rewards-null")
+            raise RuntimeError(f"MGM: {missing} null after load — session likely expired or markup changed; refresh mgm cookies")
         trips = _scrape_trips(page)
         _save_snapshot(rewards)
         _save_trips(trips)
+        save_cookies(browser, "mgm")  # refresh the rolling session for the next run
         print("\n✅ MGM scrape complete!\n")
     except Exception as e:
         print(f"❌ MGM error: {e}")
         debug_snapshot(page, "mgm-error")
+        raise  # propagate so run.py marks MGM failed + exits non-zero (no silent pass)
     finally:
         page.close()
+    return rewards
 
 
 def _login(page: Page) -> None:
@@ -136,23 +154,48 @@ def _click_submit(page: Page) -> None:
 
 
 def _appears_logged_in(page: Page) -> bool:
-    """Cheap heuristic: account/profile link in nav, no Sign In button."""
+    """Poll the rewards page for a logged-in signal — the balances render a few
+    seconds after load, so a single early check false-negatives."""
     try:
         page.goto("https://www.mgmresorts.com/rewards/", wait_until="domcontentloaded", timeout=20000)
-        random_delay(1500, 2500)
-        text = page.evaluate("() => document.body.innerText")
-        return ("Sign In" not in text and "Sign Out" in text) or "Tier Credits" in text
+        try:
+            page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass
+        import time as _t
+        deadline = _t.time() + 15
+        while _t.time() < deadline:
+            try:
+                text = page.evaluate("() => document.body.innerText")
+            except Exception:
+                text = ""
+            if "/signin" not in page.url and (
+                ("Sign In" not in text and "Sign Out" in text)
+                or "Tier Credit" in text or "Rewards Points" in text):
+                return True
+            random_delay(1500, 2000)
+        return False
     except Exception:
         return False
 
 
 def _scrape_rewards(page: Page) -> dict:
     print("📊 Scraping MGM rewards...")
-    if "/rewards" not in page.url:
-        human_navigate(page, "https://www.mgmresorts.com/rewards/")
-    random_delay(2000, 4000)
-
-    text: str = page.evaluate("() => document.body.innerText")
+    human_navigate(page, "https://www.mgmresorts.com/rewards/")
+    # Balances hydrate a few seconds after load — poll until the tier/points
+    # content appears (a cold first visit otherwise reads an empty shell → all
+    # None, which is what happened without a warm-up navigation).
+    import time as _t
+    text = ""
+    deadline = _t.time() + 25
+    while _t.time() < deadline:
+        try:
+            text = page.evaluate("() => document.body.innerText") or ""
+        except Exception:
+            text = ""
+        if re.search(r"Tier Credits|Rewards Points|FREEPLAY", text, re.I):
+            break
+        random_delay(1500, 2500)
 
     def grab(pattern, group=1, flags=re.I):
         m = re.search(pattern, text, flags)
@@ -217,6 +260,11 @@ def _scrape_trips(page: Page) -> list[dict]:
 
 
 def _save_snapshot(data: dict) -> None:
+    # run_ts in Pacific with correct offset; overrides the DB default that stamped
+    # Pacific wall-clock as "+00:00" (zulu), which made the instant read wrong.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    data = {**data, "run_ts": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()}
     res = supabase.table("mgm_rewards_snapshots").insert(data).execute()
     if getattr(res, "error", None):
         print(f"  ❌ Snapshot save error: {res.error}")

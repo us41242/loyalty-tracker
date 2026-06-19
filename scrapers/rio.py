@@ -16,23 +16,34 @@ from .browser import (
 from .db import parse_date, supabase, today_iso
 
 
-def scrape_rio(browser: BrowserContext) -> None:
+def scrape_rio(browser: BrowserContext) -> dict | None:
+    """Scrape + save Rio. Returns the snapshot dict (or None on hard failure)
+    so the combined runner can validate fields and decide whether to retry."""
     print("\n═══════════════════════════════════════")
     print("  RIO REWARDS SCRAPER")
     print("═══════════════════════════════════════\n")
 
     page = new_page(browser)
+    snap = None
+    snap = None
     try:
         _login(page)
         snap, offers = _scrape_rewards_and_offers(page)
+        # HARD non-null check: never save/move on with missing balances — fail loud.
+        missing = [k for k in ("tier_status", "points_balance") if snap.get(k) is None]
+        if missing:
+            debug_snapshot(page, "rio-rewards-null")
+            raise RuntimeError(f"Rio: {missing} null after load — session expired or markup changed")
         _save_snapshot(snap)
         _save_offers(offers)
         print("\n✅ Rio scrape complete!\n")
     except Exception as e:
         print(f"❌ Rio error: {e}")
         debug_snapshot(page, "rio-error")
+        raise  # propagate so run.py marks Rio failed + exits non-zero (no silent pass)
     finally:
         page.close()
+    return snap
 
 
 def _login(page: Page) -> None:
@@ -134,6 +145,11 @@ def _extract_offers(page: Page) -> list[dict]:
 
 
 def _save_snapshot(s: dict) -> None:
+    # run_ts in Pacific with correct offset; overrides the DB default that stamped
+    # Pacific wall-clock as "+00:00" (zulu), which made the instant read wrong.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    s = {**s, "run_ts": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()}
     res = supabase.table("rio_rewards_snapshots").insert(s).execute()
     if getattr(res, "error", None):
         print(f"  ❌ Snapshot save error: {res.error}")
@@ -177,11 +193,11 @@ def _save_offers(offers: list[dict]) -> None:
         }
 
         try:
-            existing_id = _find_existing(o.get("offerCode"), title, valid_start, valid_end)
-            if existing_id is not None:
-                supabase.table("rio_offers").update(row).eq("id", existing_id).execute()
-            else:
-                supabase.table("rio_offers").insert(row).execute()
+            # Upsert on the table's real unique key (title, valid_end) so a
+            # re-listed offer updates in place instead of violating the
+            # constraint (the old find-then-insert keyed on valid_start too,
+            # which mismatched the DB constraint and errored on every repeat).
+            supabase.table("rio_offers").upsert(row, on_conflict="title,valid_end").execute()
             saved += 1
         except Exception as e:
             print(f"  ❌ {title[:40]}: {e}")
