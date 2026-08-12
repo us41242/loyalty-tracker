@@ -441,14 +441,23 @@ def _scrape_reservations(page: Page, tab: str) -> list[dict]:
     human_navigate(page, "https://www.caesars.com/rewards/stays")
 
     try:
-        page.evaluate(
+        # The stays tabs are React-Native-Web DIVs, not links/buttons:
+        # [data-testid="profile-header-tab-past"] etc. A synthetic el.click()
+        # doesn't fire their handler reliably — use a real mouse click on the
+        # element's center. Fallback: case-insensitive text match on any leaf.
+        rect = page.evaluate(
             """(t) => {
-                const el = [...document.querySelectorAll('a, button, span')]
-                    .find(l => l.textContent.trim() === t);
-                if (el) el.click();
+                let el = document.querySelector(`[data-testid="profile-header-tab-${t}"]`);
+                if (!el) el = [...document.querySelectorAll('*')].find(x =>
+                    x.children.length === 0 && x.textContent.trim().toUpperCase() === t.toUpperCase());
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width };
             }""",
-            tab.upper(),
+            tab.lower(),
         )
+        if rect and rect.get("w"):
+            page.mouse.click(rect["x"], rect["y"])
         random_delay(2000, 3000)
     except Exception:
         pass
@@ -462,7 +471,8 @@ def _scrape_reservations(page: Page, tab: str) -> list[dict]:
     while _t.time() < _dl:
         t = page.evaluate("() => document.body.innerText") or ""
         if any(k in t for k in ("Confirmation", "Check-in", "Check-In")) or \
-           any(k in t for k in ("No upcoming", "No reservations", "no upcoming", "don't have any")):
+           any(k in t for k in ("No upcoming", "No reservations", "no upcoming", "don't have any",
+                                "No Current Reservation", "No Past Reservation", "No Cancelled Reservation")):
             break
         _t.sleep(1.5)
 
@@ -480,14 +490,18 @@ def _scrape_reservations(page: Page, tab: str) -> list[dict]:
          "Aug", "Sep", "Oct", "Nov", "Dec"], start=1)}
 
     def _frag_to_iso(frag: str) -> str | None:
-        # "Mon, Jun 29 4:00 PM" → "2026-06-29"; roll year forward if the month
-        # is already behind us (a Jan booking viewed in Dec is next year).
-        m = re.search(r"\b([A-Z][a-z]{2})\s+(\d{1,2})\b", frag or "")
+        # "Mon, Jun 29 4:00 PM" → "2026-06-29". No year on the page, so roll by
+        # tab: current/upcoming stays roll FORWARD (Jan viewed in Dec = next
+        # year); past stays roll BACKWARD (Dec viewed in Jan = last year).
+        m = re.search(r"\b([A-Z][a-z]{2})\s+(\d{1,2})\b", (frag or "").title())
         if not m or m.group(1) not in _MON:
             return None
         mon, day = _MON[m.group(1)], int(m.group(2))
         now = _dt.now()
-        year = now.year + (1 if mon < now.month else 0)
+        if tab == "past":
+            year = now.year - (1 if mon > now.month else 0)
+        else:
+            year = now.year + (1 if mon < now.month else 0)
         return f"{year}-{mon:02d}-{day:02d}"
 
     res_re = re.compile(
@@ -631,6 +645,12 @@ def _read_offer_detail(page: Page) -> dict | None:
                 .map(e => e.innerText.trim()).filter(Boolean);
             if (items.length) properties = items.join(', ');
         }
+        // Online-bookable offers render a hotel-picker select; phone-only
+        // offers don't. Its option values are the real property codes.
+        const sel = document.querySelector('select[aria-label^="Select a hotel or resort"]');
+        const bookProps = sel ? [...sel.options]
+            .filter(o => o.value && o.value !== '__NativebasePlaceholder__')
+            .map(o => ({ code: o.value, name: o.text.trim() })) : null;
         return {
             display_id_text: idEl.innerText.trim(),
             detail_text: detailEl.innerText,
@@ -638,6 +658,8 @@ def _read_offer_detail(page: Page) -> dict | None:
             eligible_properties: properties,
             valid_raw: dateEl ? dateEl.innerText.trim() : null,
             category: iconEl ? iconEl.alt.replace(/ Offer$/, '').trim() : null,
+            book_online: !!sel,
+            book_props: bookProps,
         };
     }""")
 
@@ -753,6 +775,8 @@ def _scrape_one_group(page: Page, group: str, section: str,
             "valid_end": valid_end,
             "section": section,
             "category": data.get("category"),
+            "book_online": bool(data.get("book_online")),
+            "book_props": data.get("book_props"),
         })
 
         # Step to the next offer; bail when there isn't one
@@ -857,6 +881,8 @@ def _save_offers(offers: list[dict]) -> None:
             "valid_start": o.get("valid_start"),
             "valid_end": o.get("valid_end"),
             "expires_at": o.get("valid_end"),
+            "book_online": o.get("book_online"),
+            "book_props": o.get("book_props"),
             "run_ts": now_iso,
         }
         res = supabase.table("caesars_offers").upsert(row, on_conflict="offer_id").execute()

@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS caesars_offers (
   valid_start         DATE,
   valid_end           DATE,
   expires_at          DATE,
+  book_online         BOOLEAN,
+  book_props          JSONB,
   run_ts              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
